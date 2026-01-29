@@ -1504,25 +1504,18 @@ fn extract_and_learn_facts(data: &BotData, response: &str, user_id: i64) {
     }
 }
 
-/// Load system context from ELIOT.md and store key facts
+/// Load system context and store key facts
 fn load_context(data: &BotData) -> String {
-    let context_path = std::path::Path::new("/home/eliot/personal/dev/quantum-nexus-trading/claudebot-mcp/context/ELIOT.md");
-
-    if !context_path.exists() {
-        return format!("Context file not found: {}", context_path.display());
-    }
-
     // Store key facts as memories
     let mut learned_count = 0;
     let store = data.memory_store.lock().unwrap();
 
     let key_facts = [
         ("identity", "I am Eliot, an AI coding assistant powered by Claude, operating as a Telegram bot with persistent memory"),
-        ("environment", "Server: clawdbot-prod (Hetzner), Tailscale IP: 100.94.120.80, User: eliot"),
-        ("velofi", "Velofi Trading Platform at /home/eliot/personal/dev/quantum-nexus-trading - Rust 14 crates + Nuxt 3 + PostgreSQL - HFT crypto with German tax compliance"),
-        ("claudebot", "ClaudeBot MCP at /home/eliot/personal/dev/quantum-nexus-trading/claudebot-mcp - Rust + teloxide + SQLite"),
-        ("tools", "Available: Claude CLI, Ollama (llama3.2, nomic-embed-text), Git, Cargo, SQLite"),
-        ("workflow", "1. Receive task via Telegram, 2. Check permissions, 3. Recall memories, 4. Execute via Claude CLI, 5. Store learnings, 6. Report results"),
+        ("environment", "Server: clawdbot-prod (Hetzner), Tailscale IP: 100.94.120.80, Domain: clawdbot.velofi.io, User: eliot"),
+        ("claudebot", "ClaudeBot MCP - Rust Telegram bot with hybrid semantic memory (BM25 + vector), gRPC bridge, Claude CLI integration"),
+        ("tools", "Available: Claude CLI (autonomous), Ollama (llama3.2, nomic-embed-text), Git, Cargo, SQLite"),
+        ("workflow", "1. Receive task via Telegram, 2. Check permissions, 3. Recall memories (hybrid search), 4. Execute via Claude CLI, 5. Store learnings, 6. Report results"),
         ("rules", "Always verify directory before coding, run tests after changes, never commit secrets, use Decimal for money (never f64)"),
         ("team", "CEO: Technical (can code), marketing genius, delegates to workers/AI, prefers results over status updates"),
     ];
@@ -1535,17 +1528,15 @@ fn load_context(data: &BotData) -> String {
 
     format!(
         "Context Loaded\n\n\
-        Source: {}\n\
         Facts stored: {}\n\n\
         I now understand:\n\
         - My identity as Eliot\n\
-        - Server environment\n\
-        - Projects (Velofi, ClaudeBot)\n\
+        - Server environment (Hetzner/Tailscale)\n\
+        - ClaudeBot architecture\n\
         - Available tools\n\
         - Coding workflow & rules\n\
         - Team structure\n\n\
         Use /memory to view stored facts.",
-        context_path.display(),
         learned_count
     )
 }
