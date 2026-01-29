@@ -1,0 +1,30 @@
+[Unit]
+Description=ClaudeBot Telegram - Eliot Brain
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/eliot/workspace
+
+# Environment
+Environment=RUST_LOG=info
+Environment=CLAUDE_WORKING_DIR=/home/eliot/workspace
+Environment=USAGE_DB_PATH=/home/eliot/workspace/usage.db
+Environment=MEMORY_DB_PATH=/home/eliot/workspace/memory.db
+EnvironmentFile=/home/eliot/.env.claudebot
+
+# Run telegram bot
+ExecStart=/home/eliot/bin/claudebot-mcp --telegram
+
+# Restart policy
+Restart=always
+RestartSec=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=claudebot
+
+[Install]
+WantedBy=default.target
