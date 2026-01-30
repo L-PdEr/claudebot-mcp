@@ -1122,15 +1122,15 @@ async fn handle_text(
                 ctx.set_command(&enhanced_prompt);
             }).await;
 
-            // Create approval keyboard
+            // Create approval keyboard with short labels to fit on mobile
             let keyboard = teloxide::types::InlineKeyboardMarkup::new(vec![
                 vec![
                     teloxide::types::InlineKeyboardButton::callback(
-                        "✅ Approve All",
+                        "✅ Run",
                         format!("perm_approve:{}", request_id)
                     ),
                     teloxide::types::InlineKeyboardButton::callback(
-                        "❌ Cancel",
+                        "❌ Stop",
                         format!("perm_deny:{}", request_id)
                     ),
                 ],
@@ -1438,9 +1438,12 @@ async fn handle_command(
                 /status - Check bot status\n\
                 /preflight [cmd] - Check tool availability\n\n\
                 Permissions:\n\
-                /autonomous [duration] - Full access mode\n\
-                /supervised - Require approval\n\
-                /perms - View permission status\n\n\
+                /interactive - Toggle pre-approval mode\n\
+                  → Shows Run/Stop buttons before executing\n\
+                  → Preview what operations will run\n\
+                /autonomous [duration] - Auto-approve all\n\
+                /supervised - Back to normal mode\n\
+                /perms - View current permission status\n\n\
                 Bypass Bridge (AR):\n\
                 /bypass <task> - Execute on AR server\n\
                 /bypass_file <path> - Analyze file on AR\n\
