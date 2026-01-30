@@ -202,6 +202,9 @@ pub async fn run_telegram_bot() -> Result<()> {
         // Phase 6: Initialize advanced UX components
         ui_contexts: RwLock::new(HashMap::new()),
         progress_manager: ProgressManager::new(),
+        // Interactive permissions
+        interactive_permissions: RwLock::new(HashMap::new()),
+        pending_permissions: RwLock::new(HashMap::new()),
     });
 
     // Auto-load system context on startup
@@ -447,6 +450,87 @@ async fn callback_handler(
         bot.answer_callback_query(&query.id)
             .text(&format!("Worker {} kill requested", worker_id))
             .await?;
+    } else if callback_data.starts_with("perm_approve:") {
+        // Interactive permission approval - execute the stored command
+        let request_id = callback_data.strip_prefix("perm_approve:").unwrap_or("");
+
+        if let Some(pending) = data.take_pending_permission(request_id).await {
+            bot.answer_callback_query(&query.id)
+                .text("Permission approved - executing...")
+                .await?;
+
+            // Get the stored command from UI context
+            let ui_context = data.get_ui_context(pending.chat_id).await;
+            if let Some(command) = ui_context.last_command {
+                // Update the message to show approval
+                if let Some(msg) = &query.message {
+                    let _ = bot.edit_message_text(
+                        ChatId(pending.chat_id),
+                        msg.id(),
+                        format!("✅ Approved: {}\n\nExecuting...", pending.description)
+                    ).await;
+                }
+
+                // Execute the command
+                let working_dir = data.working_dir_for_user(user_id);
+                let is_autonomous = matches!(
+                    data.permission_manager.get_status(user_id).level,
+                    crate::permissions::PermissionLevel::Autonomous
+                );
+
+                match invoke_claude_cli(&command, &working_dir, is_autonomous).await {
+                    Ok(response) => {
+                        // Record usage
+                        record_usage(&data, user_id, &response);
+
+                        // Send response
+                        let _ = send_long_message(&bot, ChatId(pending.chat_id), &response.text).await;
+                    }
+                    Err(e) => {
+                        let _ = bot.send_message(
+                            ChatId(pending.chat_id),
+                            format!("❌ Error executing command: {}", e)
+                        ).await;
+                    }
+                }
+            } else {
+                let _ = bot.send_message(
+                    ChatId(pending.chat_id),
+                    "❌ No pending command found - request may have expired"
+                ).await;
+            }
+        } else {
+            bot.answer_callback_query(&query.id)
+                .text("Permission request expired or not found")
+                .await?;
+        }
+    } else if callback_data.starts_with("perm_deny:") {
+        // Interactive permission denial - cancel the operation
+        let request_id = callback_data.strip_prefix("perm_deny:").unwrap_or("");
+
+        if let Some(pending) = data.take_pending_permission(request_id).await {
+            bot.answer_callback_query(&query.id)
+                .text("Permission denied - operation cancelled")
+                .await?;
+
+            // Update the message to show denial
+            if let Some(msg) = &query.message {
+                let _ = bot.edit_message_text(
+                    ChatId(pending.chat_id),
+                    msg.id(),
+                    format!("❌ Denied: {}\n\nOperation cancelled.", pending.description)
+                ).await;
+            }
+
+            // Clear the stored command
+            data.update_ui_context(pending.chat_id, |ctx| {
+                ctx.last_command = None;
+            }).await;
+        } else {
+            bot.answer_callback_query(&query.id)
+                .text("Permission request expired or not found")
+                .await?;
+        }
     } else {
         bot.answer_callback_query(&query.id).await?;
     }
@@ -470,6 +554,18 @@ struct BotData {
     // Phase 6: Advanced UX components
     ui_contexts: RwLock<HashMap<i64, UiContext>>,  // Per-chat UI context
     progress_manager: ProgressManager,
+    // Interactive permission mode - when enabled, shows permission requests to user
+    interactive_permissions: RwLock<HashMap<i64, bool>>,
+    // Pending permission requests: request_id -> (chat_id, permission_description)
+    pending_permissions: RwLock<HashMap<String, PendingPermission>>,
+}
+
+/// Pending permission request waiting for user approval
+struct PendingPermission {
+    chat_id: i64,
+    description: String,
+    tool: String,
+    created_at: Instant,
 }
 
 impl BotData {
@@ -505,6 +601,35 @@ impl BotData {
         let mut contexts = self.ui_contexts.write().await;
         let ctx = contexts.entry(chat_id).or_default();
         f(ctx);
+    }
+
+    /// Check if interactive permission mode is enabled for a user
+    async fn is_interactive_mode(&self, user_id: i64) -> bool {
+        let modes = self.interactive_permissions.read().await;
+        modes.get(&user_id).copied().unwrap_or(false)
+    }
+
+    /// Set interactive permission mode for a user
+    async fn set_interactive_mode(&self, user_id: i64, enabled: bool) {
+        let mut modes = self.interactive_permissions.write().await;
+        modes.insert(user_id, enabled);
+    }
+
+    /// Store a pending permission request
+    async fn add_pending_permission(&self, request_id: &str, chat_id: i64, tool: &str, description: &str) {
+        let mut pending = self.pending_permissions.write().await;
+        pending.insert(request_id.to_string(), PendingPermission {
+            chat_id,
+            description: description.to_string(),
+            tool: tool.to_string(),
+            created_at: Instant::now(),
+        });
+    }
+
+    /// Get and remove a pending permission request
+    async fn take_pending_permission(&self, request_id: &str) -> Option<PendingPermission> {
+        let mut pending = self.pending_permissions.write().await;
+        pending.remove(request_id)
     }
 }
 
@@ -975,6 +1100,55 @@ async fn handle_text(
         crate::permissions::PermissionLevel::Autonomous
     );
 
+    // Check if interactive permission mode is enabled
+    let interactive_mode = data.is_interactive_mode(user_id).await;
+
+    if interactive_mode {
+        // In interactive mode, show predicted operations and ask for approval
+        let predicted_ops = predict_operations(&expanded_text);
+
+        if !predicted_ops.is_empty() {
+            // Generate request ID and store pending request
+            let request_id = format!("perm_{}", chrono::Utc::now().timestamp_millis());
+            data.add_pending_permission(
+                &request_id,
+                chat_id.0,
+                "multiple",
+                &predicted_ops.join(", ")
+            ).await;
+
+            // Store the prompt for later execution
+            data.update_ui_context(chat_id.0, |ctx| {
+                ctx.set_command(&enhanced_prompt);
+            }).await;
+
+            // Create approval keyboard
+            let keyboard = teloxide::types::InlineKeyboardMarkup::new(vec![
+                vec![
+                    teloxide::types::InlineKeyboardButton::callback(
+                        "✅ Approve All",
+                        format!("perm_approve:{}", request_id)
+                    ),
+                    teloxide::types::InlineKeyboardButton::callback(
+                        "❌ Cancel",
+                        format!("perm_deny:{}", request_id)
+                    ),
+                ],
+            ]);
+
+            bot.send_message(chat_id, format!(
+                "🔐 Permission Request\n\n\
+                This task may perform:\n{}\n\n\
+                Approve to proceed?",
+                predicted_ops.iter().map(|op| format!("• {}", op)).collect::<Vec<_>>().join("\n")
+            ))
+            .reply_markup(keyboard)
+            .await?;
+
+            return Ok(());
+        }
+    }
+
     // Process with Claude Code CLI
     let result = invoke_claude_cli(&enhanced_prompt, working_dir, is_autonomous).await;
 
@@ -1060,6 +1234,46 @@ fn extract_file_path(text: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Predict what operations a prompt might require
+fn predict_operations(prompt: &str) -> Vec<String> {
+    let mut ops = Vec::new();
+    let lower = prompt.to_lowercase();
+
+    // File operations
+    if lower.contains("create") || lower.contains("write") || lower.contains("add") {
+        ops.push("Create/write files".to_string());
+    }
+    if lower.contains("edit") || lower.contains("modify") || lower.contains("change") || lower.contains("update") || lower.contains("fix") {
+        ops.push("Edit existing files".to_string());
+    }
+    if lower.contains("delete") || lower.contains("remove") {
+        ops.push("Delete files".to_string());
+    }
+
+    // Command execution
+    if lower.contains("run") || lower.contains("execute") || lower.contains("install") || lower.contains("build") || lower.contains("test") {
+        ops.push("Run shell commands".to_string());
+    }
+    if lower.contains("cargo") || lower.contains("npm") || lower.contains("pip") {
+        ops.push("Install dependencies".to_string());
+    }
+
+    // Git operations
+    if lower.contains("commit") {
+        ops.push("Git commit".to_string());
+    }
+    if lower.contains("push") {
+        ops.push("Git push to remote".to_string());
+    }
+
+    // If no specific ops detected but seems like a task
+    if ops.is_empty() && (lower.contains("please") || lower.contains("help") || lower.contains("can you")) {
+        ops.push("Read files and analyze code".to_string());
+    }
+
+    ops
 }
 
 /// Format Circle pipeline result for Telegram
@@ -1538,8 +1752,39 @@ async fn handle_command(
                 Approved operations: {}\n\n\
                 Commands:\n\
                 /autonomous [duration] - Full access\n\
-                /supervised - Require approval"
+                /supervised - Require approval\n\
+                /interactive - Toggle interactive permission prompts"
             , level_str, remaining, status.approved_ops)).await?;
+        }
+
+        "/interactive" => {
+            let current = data.is_interactive_mode(user_id).await;
+            let new_mode = if args.is_empty() {
+                !current // Toggle
+            } else {
+                matches!(args.to_lowercase().as_str(), "on" | "true" | "yes" | "1")
+            };
+
+            data.set_interactive_mode(user_id, new_mode).await;
+
+            if new_mode {
+                bot.send_message(chat_id,
+                    "🔐 INTERACTIVE PERMISSIONS ENABLED\n\n\
+                    You will be prompted to approve/deny each tool operation.\n\n\
+                    When Claude needs to:\n\
+                    • Run a bash command\n\
+                    • Write/edit files\n\
+                    • Execute system operations\n\n\
+                    You'll see buttons to [Allow] or [Deny].\n\n\
+                    Use /interactive off to disable."
+                ).await?;
+            } else {
+                bot.send_message(chat_id,
+                    "⚡ INTERACTIVE PERMISSIONS DISABLED\n\n\
+                    All operations will be auto-approved.\n\n\
+                    Use /interactive on to enable prompts."
+                ).await?;
+            }
         }
 
         "/history" | "/conv" | "/conversation" => {
