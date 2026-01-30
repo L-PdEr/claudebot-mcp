@@ -39,6 +39,7 @@ use crate::llama_worker::LlamaWorker;
 use crate::memory::MemoryStore;
 use crate::permissions::PermissionManager;
 use crate::preflight::PreflightChecker;
+use crate::circle::{Circle, PipelineMode, PipelineResult};
 use crate::telegram_ui::{
     ButtonAction, ConversationContext as UiContext, ContextParser, Intent,
     ProgressManager, suggest_next_actions, suggestions_keyboard,
@@ -1060,6 +1061,59 @@ fn extract_file_path(text: &str) -> Option<String> {
     None
 }
 
+/// Format Circle pipeline result for Telegram
+fn format_circle_result(result: &PipelineResult) -> String {
+    let mut msg = format!(
+        "Development Circle: {}\n\n\
+        Mode: {:?}\n\
+        Success: {}\n\
+        Revisions: {}\n\
+        Duration: {}ms\n",
+        result.feature,
+        result.mode,
+        if result.success { "YES" } else { "NO" },
+        result.revisions,
+        result.total_duration_ms
+    );
+
+    if let Some(ref blocked) = result.blocked_at {
+        msg.push_str(&format!("Blocked: {}\n", blocked));
+    }
+
+    msg.push_str("\n--- Phases ---\n");
+
+    for phase in &result.phases {
+        msg.push_str(&format!(
+            "\n[{}] {} ({}ms)\n",
+            phase.phase,
+            phase.persona,
+            phase.duration_ms
+        ));
+
+        if let Some(ref verdict) = phase.verdict {
+            msg.push_str(&format!("Verdict: {:?}\n", verdict));
+        }
+
+        if let Some(ref risk) = phase.risk_level {
+            msg.push_str(&format!("Risk: {:?}\n", risk));
+        }
+
+        if !phase.files_changed.is_empty() {
+            msg.push_str(&format!("Files: {}\n", phase.files_changed.join(", ")));
+        }
+
+        // Truncate output for readability
+        let output = if phase.output.len() > 500 {
+            format!("{}...\n[truncated]", &phase.output[..500])
+        } else {
+            phase.output.clone()
+        };
+        msg.push_str(&format!("\n{}\n", output));
+    }
+
+    msg
+}
+
 /// Extract diff from response text
 fn extract_diff(text: &str) -> Option<String> {
     // Look for diff blocks
@@ -1489,6 +1543,90 @@ async fn handle_command(
         "/clear" | "/clearhistory" => {
             let result = clear_conversation_history(data, chat_id.0);
             bot.send_message(chat_id, result).await?;
+        }
+
+        // Development Circle - Code Review & Security Audit
+        "/circle" | "/review" | "/security" => {
+            if args.is_empty() {
+                bot.send_message(chat_id,
+                    "Development Circle\n\n\
+                    Multi-persona code quality pipeline:\n\
+                    1. Graydon - Implementation\n\
+                    2. Linus - Code Review\n\
+                    3. Maria - Testing\n\
+                    4. Kai - Optimization\n\
+                    5. Sentinel - Security Audit (OWASP)\n\n\
+                    Usage:\n\
+                    /circle full <feature> - Full 5-phase pipeline\n\
+                    /circle review <code> - Review only (Linus + Sentinel)\n\
+                    /circle security <code> - Security audit only\n\
+                    /circle quick <task> - Quick fix (Graydon only)\n\n\
+                    Example:\n\
+                    /circle security check src/auth.rs for vulnerabilities"
+                ).await?;
+            } else {
+                // Parse mode and task
+                let (mode, task) = if args.starts_with("full ") {
+                    (PipelineMode::Full, args.strip_prefix("full ").unwrap())
+                } else if args.starts_with("review ") {
+                    (PipelineMode::ReviewOnly, args.strip_prefix("review ").unwrap())
+                } else if args.starts_with("security ") {
+                    (PipelineMode::SecurityOnly, args.strip_prefix("security ").unwrap())
+                } else if args.starts_with("quick ") {
+                    (PipelineMode::QuickFix, args.strip_prefix("quick ").unwrap())
+                } else {
+                    // Default to security audit
+                    (PipelineMode::SecurityOnly, args)
+                };
+
+                bot.send_message(chat_id, format!(
+                    "Starting Development Circle ({:?})...\n\n\
+                    Task: {}\n\n\
+                    This may take a few minutes.",
+                    mode, truncate(task, 100)
+                )).await?;
+
+                bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await?;
+
+                // Get code context - either from the task description or read a file
+                let context = if task.contains(".rs") || task.contains(".ts") || task.contains(".vue") {
+                    // Try to extract file path and read it
+                    if let Some(file_path) = extract_file_path(task) {
+                        let full_path = working_dir.join(&file_path);
+                        match tokio::fs::read_to_string(&full_path).await {
+                            Ok(content) => format!("File: {}\n\n```\n{}\n```", file_path, content),
+                            Err(_) => task.to_string(),
+                        }
+                    } else {
+                        task.to_string()
+                    }
+                } else {
+                    task.to_string()
+                };
+
+                // Run the circle pipeline
+                let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
+                let claude_client = crate::claude::ClaudeClient::new(api_key.as_deref());
+                let circle = Circle::new(claude_client);
+
+                match circle.run(task, &context, mode).await {
+                    Ok(result) => {
+                        let summary = format_circle_result(&result);
+                        send_long_message(bot, chat_id, &summary).await?;
+
+                        // Store in UI context
+                        data.update_ui_context(chat_id.0, |ctx| {
+                            ctx.set_command(&format!("/circle {:?} {}", mode, task));
+                        }).await;
+                    }
+                    Err(e) => {
+                        bot.send_message(chat_id, format!(
+                            "Circle pipeline failed:\n{}",
+                            e
+                        )).await?;
+                    }
+                }
+            }
         }
 
         // Bypass bridge commands for remote AR execution
