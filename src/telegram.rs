@@ -2489,9 +2489,23 @@ async fn send_long_message(bot: &Bot, chat_id: ChatId, text: &str) -> Result<()>
         return Ok(());
     }
 
-    if text.len() <= MAX {
-        bot.send_message(chat_id, text).await?;
+    // Convert markdown to HTML for proper code formatting
+    let html_text = markdown_to_telegram_html(text);
+
+    if html_text.len() <= MAX {
+        // Try HTML first, fall back to plain text if it fails
+        match bot.send_message(chat_id, &html_text)
+            .parse_mode(ParseMode::Html)
+            .await
+        {
+            Ok(_) => {}
+            Err(_) => {
+                // HTML failed (probably malformed), send as plain text
+                bot.send_message(chat_id, text).await?;
+            }
+        }
     } else {
+        // For long messages, split and send as plain text to avoid breaking HTML tags
         let mut remaining = text;
         while !remaining.is_empty() {
             let split_at = remaining
@@ -2501,11 +2515,105 @@ async fn send_long_message(bot: &Bot, chat_id: ChatId, text: &str) -> Result<()>
                 .map(|(i, c)| i + c.len_utf8())
                 .unwrap_or(remaining.len());
             let (chunk, rest) = remaining.split_at(split_at);
-            bot.send_message(chat_id, chunk).await?;
+
+            // Try HTML for each chunk
+            let html_chunk = markdown_to_telegram_html(chunk);
+            match bot.send_message(chat_id, &html_chunk)
+                .parse_mode(ParseMode::Html)
+                .await
+            {
+                Ok(_) => {}
+                Err(_) => {
+                    bot.send_message(chat_id, chunk).await?;
+                }
+            }
             remaining = rest;
         }
     }
     Ok(())
+}
+
+/// Convert markdown code blocks to Telegram HTML format
+fn markdown_to_telegram_html(text: &str) -> String {
+    let mut result = String::with_capacity(text.len() + 100);
+    let mut chars = text.chars().peekable();
+    let mut in_code_block = false;
+    let mut in_inline_code = false;
+
+    while let Some(c) = chars.next() {
+        if c == '`' {
+            // Check for code block (```)
+            if chars.peek() == Some(&'`') {
+                chars.next(); // consume second `
+                if chars.peek() == Some(&'`') {
+                    chars.next(); // consume third `
+
+                    if in_code_block {
+                        result.push_str("</code></pre>");
+                        in_code_block = false;
+                    } else {
+                        // Skip language identifier if present (e.g., ```rust)
+                        while let Some(&ch) = chars.peek() {
+                            if ch == '\n' {
+                                chars.next();
+                                break;
+                            } else if ch.is_alphanumeric() || ch == '_' || ch == '-' {
+                                chars.next();
+                            } else if ch == '\n' || ch == '\r' {
+                                chars.next();
+                                break;
+                            } else {
+                                break;
+                            }
+                        }
+                        result.push_str("<pre><code>");
+                        in_code_block = true;
+                    }
+                    continue;
+                }
+            }
+
+            // Single backtick - inline code
+            if !in_code_block {
+                if in_inline_code {
+                    result.push_str("</code>");
+                    in_inline_code = false;
+                } else {
+                    result.push_str("<code>");
+                    in_inline_code = true;
+                }
+                continue;
+            }
+        }
+
+        // Escape HTML special characters (but not inside code blocks for readability)
+        if !in_code_block && !in_inline_code {
+            match c {
+                '<' => result.push_str("&lt;"),
+                '>' => result.push_str("&gt;"),
+                '&' => result.push_str("&amp;"),
+                _ => result.push(c),
+            }
+        } else {
+            // Inside code: still escape < and > to prevent HTML injection
+            match c {
+                '<' => result.push_str("&lt;"),
+                '>' => result.push_str("&gt;"),
+                '&' => result.push_str("&amp;"),
+                _ => result.push(c),
+            }
+        }
+    }
+
+    // Close any unclosed tags
+    if in_inline_code {
+        result.push_str("</code>");
+    }
+    if in_code_block {
+        result.push_str("</code></pre>");
+    }
+
+    result
 }
 
 // ============ Bypass Bridge Functions ============
