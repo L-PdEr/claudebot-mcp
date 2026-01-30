@@ -218,49 +218,37 @@ impl PreflightChecker {
     }
 
     /// Check only tools/creds needed for a specific command
+    /// Only claude is mandatory - everything else is a warning
     pub async fn check_for_command(&self, command: &str) -> PreflightResult {
         let mut result = PreflightResult {
             ready: true,
             ..Default::default()
         };
 
-        let needed_tools = self.detect_required_tools(command);
-        debug!("Command requires tools: {:?}", needed_tools);
-
-        // Check required tools
-        for tool_name in &needed_tools {
-            if let Some(check) = self.required_tools.get(tool_name) {
-                if !self.tool_exists(check).await {
-                    result
-                        .missing_tools
-                        .push(format!("{} ({})", tool_name, check.install_hint));
-                    result.ready = false;
-                }
-            }
-        }
-
-        // Check credentials based on command
-        let cmd_lower = command.to_lowercase();
-
-        // GitHub operations need gh auth
-        if cmd_lower.contains("github")
-            || cmd_lower.contains("gh ")
-            || cmd_lower.contains("repo")
-            || cmd_lower.contains("pull request")
-            || cmd_lower.contains("pr ")
-        {
-            if let Err(e) = self.check_gh_auth().await {
-                result.missing_creds.push(format!("GitHub CLI: {}", e));
+        // Only claude CLI is mandatory
+        if let Some(check) = self.required_tools.get("claude") {
+            if !self.tool_exists(check).await {
+                result
+                    .missing_tools
+                    .push(format!("claude ({})", check.install_hint));
                 result.ready = false;
             }
         }
 
-        // Git push/clone needs SSH or token
-        if cmd_lower.contains("push") || cmd_lower.contains("clone") {
-            if !self.has_ssh_key().await && std::env::var("GITHUB_TOKEN").is_err() {
-                result.warnings.push(
-                    "No SSH key or GITHUB_TOKEN found - git push may fail".into()
-                );
+        // Other tools are optional - just warn if missing
+        let needed_tools = self.detect_required_tools(command);
+        debug!("Command may use tools: {:?}", needed_tools);
+
+        for tool_name in &needed_tools {
+            if tool_name == "claude" {
+                continue; // Already checked above
+            }
+            if let Some(check) = self.required_tools.get(tool_name) {
+                if !self.tool_exists(check).await {
+                    result.warnings.push(
+                        format!("{} not found - some operations may fail ({})", tool_name, check.install_hint)
+                    );
+                }
             }
         }
 
