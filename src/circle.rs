@@ -1,11 +1,11 @@
 //! Development Circle (E5)
 //!
 //! Multi-persona code quality pipeline with 5 phases:
-//! 1. Graydon - Implementation
-//! 2. Linus - Code Review
-//! 3. Maria - Testing
-//! 4. Kai - Optimization
-//! 5. Sentinel - Security Audit
+//! 1. Carmack - Implementation (John Carmack style - elegant, efficient, correct)
+//! 2. Linus - Code Review (Linus Torvalds rigor)
+//! 3. Maria - Testing (Kent Beck TDD mastery)
+//! 4. Kai - Optimization (Data-oriented design)
+//! 5. Sentinel - Security Audit (OWASP + breach mentality)
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,7 @@ pub enum PipelineMode {
     Full,
     /// Review only (Linus + Sentinel)
     ReviewOnly,
-    /// Quick fix (Graydon only)
+    /// Quick fix (Carmack only)
     QuickFix,
     /// Security audit (Sentinel only)
     SecurityOnly,
@@ -34,22 +34,22 @@ pub enum PipelineMode {
 /// Persona in the development circle
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Persona {
-    /// Senior Developer - Implementation
-    Graydon,
-    /// Tech Lead - Code Review
+    /// Legendary Engineer - Implementation (John Carmack style)
+    Carmack,
+    /// Tech Lead - Code Review (Linus Torvalds rigor)
     Linus,
-    /// QA Engineer - Testing
+    /// QA Mastermind - Testing (Kent Beck TDD)
     Maria,
-    /// Craftsman - Optimization
+    /// Performance Craftsman - Optimization (Data-oriented design)
     Kai,
-    /// Security Expert - Audit
+    /// Security Guardian - Audit (OWASP + breach mentality)
     Sentinel,
 }
 
 impl Persona {
     pub fn name(&self) -> &'static str {
         match self {
-            Persona::Graydon => "Graydon",
+            Persona::Carmack => "Carmack",
             Persona::Linus => "Linus",
             Persona::Maria => "Maria",
             Persona::Kai => "Kai",
@@ -59,7 +59,7 @@ impl Persona {
 
     pub fn role(&self) -> &'static str {
         match self {
-            Persona::Graydon => "Implementation",
+            Persona::Carmack => "Implementation",
             Persona::Linus => "Code Review",
             Persona::Maria => "Testing",
             Persona::Kai => "Optimization",
@@ -69,7 +69,7 @@ impl Persona {
 
     pub fn phase(&self) -> u8 {
         match self {
-            Persona::Graydon => 1,
+            Persona::Carmack => 1,
             Persona::Linus => 2,
             Persona::Maria => 3,
             Persona::Kai => 4,
@@ -80,7 +80,7 @@ impl Persona {
     /// Get the persona's system prompt
     pub fn system_prompt(&self) -> &'static str {
         match self {
-            Persona::Graydon => GRAYDON_PROMPT,
+            Persona::Carmack => CARMACK_PROMPT,
             Persona::Linus => LINUS_PROMPT,
             Persona::Maria => MARIA_PROMPT,
             Persona::Kai => KAI_PROMPT,
@@ -91,7 +91,7 @@ impl Persona {
     /// Model hint for this persona
     pub fn model_hint(&self) -> &'static str {
         match self {
-            Persona::Graydon => "sonnet",
+            Persona::Carmack => "sonnet",
             Persona::Linus => "sonnet",
             Persona::Maria => "sonnet",
             Persona::Kai => "sonnet",
@@ -201,14 +201,14 @@ impl Circle {
 
         let phases = match mode {
             PipelineMode::Full => vec![
-                Persona::Graydon,
+                Persona::Carmack,
                 Persona::Linus,
                 Persona::Maria,
                 Persona::Kai,
                 Persona::Sentinel,
             ],
             PipelineMode::ReviewOnly => vec![Persona::Linus, Persona::Sentinel],
-            PipelineMode::QuickFix => vec![Persona::Graydon],
+            PipelineMode::QuickFix => vec![Persona::Carmack],
             PipelineMode::SecurityOnly => vec![Persona::Sentinel],
         };
 
@@ -239,10 +239,10 @@ impl Circle {
                             });
                         }
 
-                        // Return to Graydon with feedback
+                        // Return to Carmack with feedback
                         state.feedback = Some(result.output.clone());
                         state.phases.push(result);
-                        phase_idx = 0; // Back to Graydon
+                        phase_idx = 0; // Back to Carmack
                         continue;
                     }
                 }
@@ -269,7 +269,7 @@ impl Circle {
             }
 
             // Update code context for next phase
-            if !result.output.is_empty() && persona == Persona::Graydon {
+            if !result.output.is_empty() && persona == Persona::Carmack {
                 state.code_context = result.output.clone();
             }
 
@@ -355,7 +355,7 @@ impl Circle {
 
         // Add phase-specific instructions
         match persona {
-            Persona::Graydon => {
+            Persona::Carmack => {
                 prompt.push_str("\n\n## Task\n\nImplement this feature completely. Create all necessary files and write production-ready code.");
             }
             Persona::Linus => {
@@ -458,28 +458,55 @@ impl Circle {
 // PERSONA SYSTEM PROMPTS
 // ============================================================================
 
-const GRAYDON_PROMPT: &str = r#"You are Graydon, a Senior Software Engineer specializing in Rust and TypeScript.
-Named after Graydon Hoare, creator of Rust.
+const CARMACK_PROMPT: &str = r#"You are Carmack, a legendary Implementation Engineer channeling:
+- John Carmack (id Software) - optimization genius, clean architecture, correctness first
+- Rob Pike (Go, Plan 9) - simplicity, clarity, "less is more"
+- Bryan Cantrill (DTrace, Oxide) - systems thinking, debugging mastery
 
-## Your Standards
+"If you want to make something, make it well." - John Carmack
 
-- Write production-ready, compilable code
-- Use Result<T, E> for errors, never panic in library code
-- Use Decimal for money, never f64
-- Document public APIs with /// doc comments
-- Include basic unit tests
+## Implementation Philosophy
 
-## Forbidden
+1. Understand the problem DEEPLY before writing code
+2. Design data structures first - they define the algorithm
+3. Write the simplest solution that could possibly work
+4. Handle ALL error cases explicitly - no shortcuts
+5. Optimize only what measurements prove is slow
 
-- No .unwrap() without context - use .expect() or ?
-- No magic numbers - use constants
-- No unsafe without SAFETY comments
-- No f64 for financial calculations
-- No TODO comments - implement completely
+## Chain-of-Thought Process
+
+Before implementation, think through:
+1. What is the core abstraction/data structure?
+2. What are ALL the failure modes?
+3. What are the edge cases (zero, MAX, empty, concurrent)?
+4. What would make this code obviously correct?
+
+## Constraints
+
+### Forbidden
+- .unwrap() without safety proof - use .expect("reason") or ?
+- Magic numbers - define constants with meaningful names
+- f64 for money/financial - use Decimal
+- panic! in library code - return Result<T, E>
+- TODO comments - implement completely or don't commit
+- Premature abstraction - earn complexity through need
+
+### Required
+- Result<T, E> for all fallible operations
+- Meaningful error types with context
+- /// doc comments on all public APIs
+- Unit tests for core logic
+- Zero compiler warnings
 
 ## Output Format
 
-Provide complete file contents with clear paths. Use code blocks with language tags.
+Provide complete, production-ready code:
+1. Brief analysis of approach (3-5 sentences)
+2. Complete implementation with file paths
+3. Unit tests covering happy path and edge cases
+4. Usage examples
+
+Your code should compile cleanly and be obviously correct at first reading.
 "#;
 
 const LINUS_PROMPT: &str = r#"You are Linus, a Tech Lead performing code review.
@@ -658,16 +685,16 @@ mod tests {
 
     #[test]
     fn test_persona_properties() {
-        assert_eq!(Persona::Graydon.phase(), 1);
+        assert_eq!(Persona::Carmack.phase(), 1);
         assert_eq!(Persona::Sentinel.phase(), 5);
         assert_eq!(Persona::Sentinel.model_hint(), "opus");
-        assert_eq!(Persona::Graydon.model_hint(), "sonnet");
+        assert_eq!(Persona::Carmack.model_hint(), "sonnet");
     }
 
     #[test]
     fn test_all_personas_have_prompts() {
         let personas = [
-            Persona::Graydon,
+            Persona::Carmack,
             Persona::Linus,
             Persona::Maria,
             Persona::Kai,
