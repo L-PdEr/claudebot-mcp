@@ -54,6 +54,7 @@ pub mod git_ops;
 pub mod worker_pool;
 pub mod coordinator;
 pub mod prom_metrics;
+pub mod telegram_ui;
 
 #[cfg(test)]
 mod telegram_tests;
@@ -80,3 +81,9 @@ pub use git_ops::{GitRepo, GitError, CommitInfo, BranchInfo, FileStatus};
 pub use worker_pool::{WorkerPool, Worker, WorkerConfig, WorkerInfo, WorkerResult, WorkerError, PoolConfig, PoolStats, PermissionLevel as WorkerPermissionLevel, WorkerOperation, WorkerStatus};
 pub use coordinator::{TaskCoordinator, Task, TaskStatus, TaskPriority, TaskType, CircuitBreaker, CircuitState, CircuitStats, CoordinatorConfig};
 pub use prom_metrics::{BridgeMetrics, Counter, Gauge, Histogram};
+pub use telegram_ui::{
+    ButtonAction, ProgressTracker, ProgressStep, StepStatus, ProgressManager,
+    ConversationContext, ContextParser, Intent, Suggestion,
+    task_progress_keyboard, confirmation_keyboard, options_keyboard,
+    suggest_next_actions, html_escape, format_progress_bar,
+};
