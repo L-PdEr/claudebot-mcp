@@ -8,7 +8,7 @@ set -e
 # Configuration
 REMOTE_USER="eliot"
 REMOTE_HOST="100.94.120.80"  # Hetzner Tailscale IP
-LOCAL_PROJECT="/home/eliot/personal/dev/quantum-nexus-trading/claudebot-mcp"
+LOCAL_PROJECT="/home/eliot/personal/dev/claudebot-mcp"
 
 echo "╔═══════════════════════════════════════════════════════════╗"
 echo "║           CLAUDEBOT TELEGRAM DEPLOYMENT                   ║"
@@ -51,13 +51,20 @@ echo "✓ Binary deployed"
 
 # Copy workspace files (CLAUDE.md, etc.)
 echo ""
-echo "[5/7] Copying workspace files..."
+echo "[5/8] Copying workspace files..."
 rsync -av --progress "$LOCAL_PROJECT/workspace/" "$REMOTE_USER@$REMOTE_HOST:~/workspace/"
 echo "✓ Workspace files synced"
 
+# Copy Claude Code commands (circle, security, review skills)
+echo ""
+echo "[6/8] Copying Claude Code commands..."
+ssh "$REMOTE_USER@$REMOTE_HOST" "mkdir -p ~/workspace/.claude/commands"
+rsync -av --progress "$LOCAL_PROJECT/.claude/" "$REMOTE_USER@$REMOTE_HOST:~/workspace/.claude/"
+echo "✓ Claude Code commands synced (security, review, circle)"
+
 # Copy systemd service
 echo ""
-echo "[6/7] Setting up systemd service..."
+echo "[7/8] Setting up systemd service..."
 scp "$LOCAL_PROJECT/deploy/claudebot-telegram.service" "$REMOTE_USER@$REMOTE_HOST:~/.config/systemd/user/"
 
 # Check if env file exists, if not copy template
@@ -71,7 +78,7 @@ echo "✓ Systemd service installed"
 
 # Enable and start service
 echo ""
-echo "[7/7] Starting service..."
+echo "[8/8] Starting service..."
 ssh "$REMOTE_USER@$REMOTE_HOST" << 'ENDSSH'
 # Enable lingering for user services
 loginctl enable-linger eliot 2>/dev/null || true
