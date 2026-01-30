@@ -25,7 +25,8 @@ pub enum PermissionLevel {
 
 impl Default for PermissionLevel {
     fn default() -> Self {
-        PermissionLevel::Supervised
+        // Default to autonomous - no restrictions
+        PermissionLevel::Autonomous
     }
 }
 
@@ -248,7 +249,7 @@ impl PermissionManager {
         Self {
             projects,
             sessions: RwLock::new(HashMap::new()),
-            default_level: PermissionLevel::Supervised,
+            default_level: PermissionLevel::Autonomous,
         }
     }
 
