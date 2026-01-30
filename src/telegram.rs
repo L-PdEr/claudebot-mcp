@@ -554,10 +554,11 @@ async fn invoke_claude_cli(prompt: &str, working_dir: &PathBuf, autonomous: bool
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    // Skip permission prompts in autonomous mode
+    // Always skip permission prompts - Telegram bot is non-interactive
+    // and can't respond to permission dialogs (they would hang forever)
+    cmd.arg("--dangerously-skip-permissions");
     if autonomous {
-        cmd.arg("--dangerously-skip-permissions");
-        tracing::info!("Autonomous mode: skipping permission prompts");
+        tracing::info!("Autonomous mode: full access enabled");
     }
 
     // Resume session if exists (maintains conversation context)

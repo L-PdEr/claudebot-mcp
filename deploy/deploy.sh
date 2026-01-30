@@ -34,7 +34,7 @@ echo "✓ Binary built: target/release/claudebot-mcp"
 
 # Create remote directories
 echo ""
-echo "[3/7] Creating remote directories..."
+echo "[3/9] Creating remote directories..."
 ssh "$REMOTE_USER@$REMOTE_HOST" << 'ENDSSH'
 mkdir -p ~/bin
 mkdir -p ~/workspace
@@ -42,29 +42,85 @@ mkdir -p ~/.config/systemd/user
 ENDSSH
 echo "✓ Directories created"
 
+# Install dependencies on server
+echo ""
+echo "[4/9] Installing dependencies on server..."
+ssh "$REMOTE_USER@$REMOTE_HOST" << 'ENDSSH'
+echo "Checking and installing required tools..."
+
+# Install Rust/Cargo if missing
+if ! command -v cargo &> /dev/null; then
+    echo "  Installing Rust/Cargo..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source ~/.cargo/env
+    echo "  ✓ Rust installed: $(cargo --version)"
+else
+    echo "  ✓ Cargo already installed: $(cargo --version)"
+fi
+
+# Install Node.js if missing (needed for Claude CLI)
+if ! command -v node &> /dev/null; then
+    echo "  Installing Node.js via nvm..."
+    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash
+    export NVM_DIR="$HOME/.nvm"
+    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+    nvm install --lts
+    echo "  ✓ Node.js installed: $(node --version)"
+else
+    echo "  ✓ Node.js already installed: $(node --version)"
+fi
+
+# Install Claude CLI if missing
+if ! command -v claude &> /dev/null; then
+    echo "  Installing Claude CLI..."
+    npm install -g @anthropic-ai/claude-code
+    echo "  ✓ Claude CLI installed: $(claude --version)"
+else
+    echo "  ✓ Claude CLI already installed: $(claude --version)"
+fi
+
+# Install gh CLI if missing (optional but useful)
+if ! command -v gh &> /dev/null; then
+    echo "  Installing GitHub CLI..."
+    (type -p wget >/dev/null || (sudo apt update && sudo apt-get install wget -y)) \
+    && sudo mkdir -p -m 755 /etc/apt/keyrings \
+    && out=$(mktemp) && wget -nv -O$out https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    && cat $out | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+    && sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && sudo apt update \
+    && sudo apt install gh -y 2>/dev/null || echo "  (gh install skipped - manual install may be needed)"
+else
+    echo "  ✓ GitHub CLI already installed: $(gh --version | head -1)"
+fi
+
+echo "✓ Dependencies checked"
+ENDSSH
+echo "✓ Server dependencies installed"
+
 # Copy binary
 echo ""
-echo "[4/7] Copying binary to server..."
+echo "[5/9] Copying binary to server..."
 scp "$LOCAL_PROJECT/target/release/claudebot-mcp" "$REMOTE_USER@$REMOTE_HOST:~/bin/"
 ssh "$REMOTE_USER@$REMOTE_HOST" "chmod +x ~/bin/claudebot-mcp"
 echo "✓ Binary deployed"
 
 # Copy workspace files (CLAUDE.md, etc.)
 echo ""
-echo "[5/8] Copying workspace files..."
+echo "[6/9] Copying workspace files..."
 rsync -av --progress "$LOCAL_PROJECT/workspace/" "$REMOTE_USER@$REMOTE_HOST:~/workspace/"
 echo "✓ Workspace files synced"
 
 # Copy Claude Code commands (circle, security, review skills)
 echo ""
-echo "[6/8] Copying Claude Code commands..."
+echo "[7/9] Copying Claude Code commands..."
 ssh "$REMOTE_USER@$REMOTE_HOST" "mkdir -p ~/workspace/.claude/commands"
 rsync -av --progress "$LOCAL_PROJECT/.claude/" "$REMOTE_USER@$REMOTE_HOST:~/workspace/.claude/"
 echo "✓ Claude Code commands synced (security, review, circle)"
 
 # Copy systemd service
 echo ""
-echo "[7/8] Setting up systemd service..."
+echo "[8/9] Setting up systemd service..."
 scp "$LOCAL_PROJECT/deploy/claudebot-telegram.service" "$REMOTE_USER@$REMOTE_HOST:~/.config/systemd/user/"
 
 # Check if env file exists, if not copy template
@@ -78,7 +134,7 @@ echo "✓ Systemd service installed"
 
 # Enable and start service
 echo ""
-echo "[8/8] Starting service..."
+echo "[9/9] Starting service..."
 ssh "$REMOTE_USER@$REMOTE_HOST" << 'ENDSSH'
 # Enable lingering for user services
 loginctl enable-linger eliot 2>/dev/null || true
