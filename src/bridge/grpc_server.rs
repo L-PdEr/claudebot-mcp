@@ -15,13 +15,16 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
-use tonic::{Request, Response, Status, Streaming};
+use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
 
 use super::proto::{
     bridge_service_server::{BridgeService, BridgeServiceServer},
     ChunkType, ExecuteChunk, ExecuteRequest, FileReadRequest, FileReadResponse,
     HealthRequest, HealthResponse, StatusRequest, StatusResponse,
+    SpawnWorkerRequest, SpawnWorkerResponse, KillWorkerRequest, KillWorkerResponse,
+    ListWorkersRequest, ListWorkersResponse, WorkerStatusRequest, WorkerStatusResponse,
+    ExecuteOnWorkerRequest, PoolStats as ProtoPoolStats,
 };
 use super::types::ClaudeCliOutput;
 
@@ -242,6 +245,65 @@ impl BridgeService for GrpcBridgeServiceImpl {
         });
 
         Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+    }
+
+    async fn spawn_worker(
+        &self,
+        _request: Request<SpawnWorkerRequest>,
+    ) -> Result<Response<SpawnWorkerResponse>, Status> {
+        // TODO: Implement with WorkerPool integration
+        Ok(Response::new(SpawnWorkerResponse {
+            success: false,
+            worker_id: String::new(),
+            error: Some("Worker pool not yet integrated".to_string()),
+        }))
+    }
+
+    async fn kill_worker(
+        &self,
+        _request: Request<KillWorkerRequest>,
+    ) -> Result<Response<KillWorkerResponse>, Status> {
+        Ok(Response::new(KillWorkerResponse {
+            success: false,
+            error: Some("Worker pool not yet integrated".to_string()),
+        }))
+    }
+
+    async fn list_workers(
+        &self,
+        _request: Request<ListWorkersRequest>,
+    ) -> Result<Response<ListWorkersResponse>, Status> {
+        Ok(Response::new(ListWorkersResponse {
+            workers: vec![],
+            pool_stats: Some(ProtoPoolStats {
+                total_workers: 0,
+                idle_workers: 0,
+                busy_workers: 0,
+                failed_workers: 0,
+                total_tasks: 0,
+                total_errors: 0,
+                utilization: 0.0,
+            }),
+        }))
+    }
+
+    async fn worker_status(
+        &self,
+        _request: Request<WorkerStatusRequest>,
+    ) -> Result<Response<WorkerStatusResponse>, Status> {
+        Ok(Response::new(WorkerStatusResponse {
+            found: false,
+            worker: None,
+        }))
+    }
+
+    type ExecuteOnWorkerStream = ExecuteStream;
+
+    async fn execute_on_worker(
+        &self,
+        _request: Request<ExecuteOnWorkerRequest>,
+    ) -> Result<Response<Self::ExecuteOnWorkerStream>, Status> {
+        Err(Status::unimplemented("Worker pool not yet integrated"))
     }
 
     async fn read_file(

@@ -15,6 +15,13 @@ service BridgeService {
 
   // Read file from remote server
   rpc ReadFile(FileReadRequest) returns (FileReadResponse);
+
+  // Worker management
+  rpc SpawnWorker(SpawnWorkerRequest) returns (SpawnWorkerResponse);
+  rpc KillWorker(KillWorkerRequest) returns (KillWorkerResponse);
+  rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
+  rpc WorkerStatus(WorkerStatusRequest) returns (WorkerStatusResponse);
+  rpc ExecuteOnWorker(ExecuteOnWorkerRequest) returns (stream ExecuteChunk);
 }
 
 // Health messages
@@ -78,4 +85,97 @@ message FileReadResponse {
   optional uint64 file_size = 3;
   bool truncated = 4;
   optional string error = 5;
+}
+
+// Worker permission levels
+enum PermissionLevel {
+  PERMISSION_LEVEL_UNSPECIFIED = 0;
+  PERMISSION_LEVEL_SANDBOX = 1;    // Read-only
+  PERMISSION_LEVEL_STANDARD = 2;   // Read/write project, git branches
+  PERMISSION_LEVEL_ELEVATED = 3;   // Install packages, builds, env
+  PERMISSION_LEVEL_BYPASS = 4;     // System commands, network, credentials
+  PERMISSION_LEVEL_ROOT = 5;       // Full access, requires confirmation
+}
+
+// Worker status enum
+enum WorkerState {
+  WORKER_STATE_UNSPECIFIED = 0;
+  WORKER_STATE_STARTING = 1;
+  WORKER_STATE_IDLE = 2;
+  WORKER_STATE_BUSY = 3;
+  WORKER_STATE_FAILED = 4;
+  WORKER_STATE_STOPPED = 5;
+}
+
+// Spawn a new worker
+message SpawnWorkerRequest {
+  string name = 1;
+  optional string working_dir = 2;
+  PermissionLevel permission_level = 3;
+  optional uint32 timeout_seconds = 4;
+}
+
+message SpawnWorkerResponse {
+  bool success = 1;
+  string worker_id = 2;
+  optional string error = 3;
+}
+
+// Kill a worker
+message KillWorkerRequest {
+  string worker_id = 1;
+}
+
+message KillWorkerResponse {
+  bool success = 1;
+  optional string error = 2;
+}
+
+// List all workers
+message ListWorkersRequest {}
+
+message ListWorkersResponse {
+  repeated WorkerInfo workers = 1;
+  PoolStats pool_stats = 2;
+}
+
+// Get worker status
+message WorkerStatusRequest {
+  string worker_id = 1;
+}
+
+message WorkerStatusResponse {
+  bool found = 1;
+  optional WorkerInfo worker = 2;
+}
+
+// Execute task on specific worker
+message ExecuteOnWorkerRequest {
+  string worker_id = 1;
+  string task = 2;
+  int64 chat_id = 3;
+}
+
+// Worker information
+message WorkerInfo {
+  string id = 1;
+  string name = 2;
+  WorkerState state = 3;
+  PermissionLevel permission_level = 4;
+  uint64 task_count = 5;
+  uint64 error_count = 6;
+  uint64 uptime_seconds = 7;
+  uint64 idle_seconds = 8;
+  optional string failure_reason = 9;
+}
+
+// Pool statistics
+message PoolStats {
+  uint32 total_workers = 1;
+  uint32 idle_workers = 2;
+  uint32 busy_workers = 3;
+  uint32 failed_workers = 4;
+  uint64 total_tasks = 5;
+  uint64 total_errors = 6;
+  double utilization = 7;
 }

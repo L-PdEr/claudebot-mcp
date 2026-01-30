@@ -80,6 +80,113 @@ pub struct FileReadResponse {
     #[prost(string, optional, tag = "5")]
     pub error: ::core::option::Option<::prost::alloc::string::String>,
 }
+/// Spawn a new worker
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SpawnWorkerRequest {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "2")]
+    pub working_dir: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(enumeration = "PermissionLevel", tag = "3")]
+    pub permission_level: i32,
+    #[prost(uint32, optional, tag = "4")]
+    pub timeout_seconds: ::core::option::Option<u32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SpawnWorkerResponse {
+    #[prost(bool, tag = "1")]
+    pub success: bool,
+    #[prost(string, tag = "2")]
+    pub worker_id: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "3")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// Kill a worker
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KillWorkerRequest {
+    #[prost(string, tag = "1")]
+    pub worker_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KillWorkerResponse {
+    #[prost(bool, tag = "1")]
+    pub success: bool,
+    #[prost(string, optional, tag = "2")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// List all workers
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct ListWorkersRequest {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListWorkersResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub workers: ::prost::alloc::vec::Vec<WorkerInfo>,
+    #[prost(message, optional, tag = "2")]
+    pub pool_stats: ::core::option::Option<PoolStats>,
+}
+/// Get worker status
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WorkerStatusRequest {
+    #[prost(string, tag = "1")]
+    pub worker_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WorkerStatusResponse {
+    #[prost(bool, tag = "1")]
+    pub found: bool,
+    #[prost(message, optional, tag = "2")]
+    pub worker: ::core::option::Option<WorkerInfo>,
+}
+/// Execute task on specific worker
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ExecuteOnWorkerRequest {
+    #[prost(string, tag = "1")]
+    pub worker_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub task: ::prost::alloc::string::String,
+    #[prost(int64, tag = "3")]
+    pub chat_id: i64,
+}
+/// Worker information
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WorkerInfo {
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(enumeration = "WorkerState", tag = "3")]
+    pub state: i32,
+    #[prost(enumeration = "PermissionLevel", tag = "4")]
+    pub permission_level: i32,
+    #[prost(uint64, tag = "5")]
+    pub task_count: u64,
+    #[prost(uint64, tag = "6")]
+    pub error_count: u64,
+    #[prost(uint64, tag = "7")]
+    pub uptime_seconds: u64,
+    #[prost(uint64, tag = "8")]
+    pub idle_seconds: u64,
+    #[prost(string, optional, tag = "9")]
+    pub failure_reason: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// Pool statistics
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct PoolStats {
+    #[prost(uint32, tag = "1")]
+    pub total_workers: u32,
+    #[prost(uint32, tag = "2")]
+    pub idle_workers: u32,
+    #[prost(uint32, tag = "3")]
+    pub busy_workers: u32,
+    #[prost(uint32, tag = "4")]
+    pub failed_workers: u32,
+    #[prost(uint64, tag = "5")]
+    pub total_tasks: u64,
+    #[prost(uint64, tag = "6")]
+    pub total_errors: u64,
+    #[prost(double, tag = "7")]
+    pub utilization: f64,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum ChunkType {
@@ -114,6 +221,89 @@ impl ChunkType {
             "CHUNK_TYPE_TOOL_USE" => Some(Self::ToolUse),
             "CHUNK_TYPE_RESULT" => Some(Self::Result),
             "CHUNK_TYPE_ERROR" => Some(Self::Error),
+            _ => None,
+        }
+    }
+}
+/// Worker permission levels
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum PermissionLevel {
+    Unspecified = 0,
+    /// Read-only
+    Sandbox = 1,
+    /// Read/write project, git branches
+    Standard = 2,
+    /// Install packages, builds, env
+    Elevated = 3,
+    /// System commands, network, credentials
+    Bypass = 4,
+    /// Full access, requires confirmation
+    Root = 5,
+}
+impl PermissionLevel {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "PERMISSION_LEVEL_UNSPECIFIED",
+            Self::Sandbox => "PERMISSION_LEVEL_SANDBOX",
+            Self::Standard => "PERMISSION_LEVEL_STANDARD",
+            Self::Elevated => "PERMISSION_LEVEL_ELEVATED",
+            Self::Bypass => "PERMISSION_LEVEL_BYPASS",
+            Self::Root => "PERMISSION_LEVEL_ROOT",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "PERMISSION_LEVEL_UNSPECIFIED" => Some(Self::Unspecified),
+            "PERMISSION_LEVEL_SANDBOX" => Some(Self::Sandbox),
+            "PERMISSION_LEVEL_STANDARD" => Some(Self::Standard),
+            "PERMISSION_LEVEL_ELEVATED" => Some(Self::Elevated),
+            "PERMISSION_LEVEL_BYPASS" => Some(Self::Bypass),
+            "PERMISSION_LEVEL_ROOT" => Some(Self::Root),
+            _ => None,
+        }
+    }
+}
+/// Worker status enum
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum WorkerState {
+    Unspecified = 0,
+    Starting = 1,
+    Idle = 2,
+    Busy = 3,
+    Failed = 4,
+    Stopped = 5,
+}
+impl WorkerState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "WORKER_STATE_UNSPECIFIED",
+            Self::Starting => "WORKER_STATE_STARTING",
+            Self::Idle => "WORKER_STATE_IDLE",
+            Self::Busy => "WORKER_STATE_BUSY",
+            Self::Failed => "WORKER_STATE_FAILED",
+            Self::Stopped => "WORKER_STATE_STOPPED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "WORKER_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "WORKER_STATE_STARTING" => Some(Self::Starting),
+            "WORKER_STATE_IDLE" => Some(Self::Idle),
+            "WORKER_STATE_BUSY" => Some(Self::Busy),
+            "WORKER_STATE_FAILED" => Some(Self::Failed),
+            "WORKER_STATE_STOPPED" => Some(Self::Stopped),
             _ => None,
         }
     }
@@ -304,6 +494,135 @@ pub mod bridge_service_client {
                 .insert(GrpcMethod::new("claudebot.bridge.BridgeService", "ReadFile"));
             self.inner.unary(req, path, codec).await
         }
+        /// Worker management
+        pub async fn spawn_worker(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SpawnWorkerRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SpawnWorkerResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/claudebot.bridge.BridgeService/SpawnWorker",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("claudebot.bridge.BridgeService", "SpawnWorker"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn kill_worker(
+            &mut self,
+            request: impl tonic::IntoRequest<super::KillWorkerRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::KillWorkerResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/claudebot.bridge.BridgeService/KillWorker",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("claudebot.bridge.BridgeService", "KillWorker"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_workers(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListWorkersRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListWorkersResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/claudebot.bridge.BridgeService/ListWorkers",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("claudebot.bridge.BridgeService", "ListWorkers"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn worker_status(
+            &mut self,
+            request: impl tonic::IntoRequest<super::WorkerStatusRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::WorkerStatusResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/claudebot.bridge.BridgeService/WorkerStatus",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("claudebot.bridge.BridgeService", "WorkerStatus"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn execute_on_worker(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ExecuteOnWorkerRequest>,
+        ) -> std::result::Result<
+            tonic::Response<tonic::codec::Streaming<super::ExecuteChunk>>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/claudebot.bridge.BridgeService/ExecuteOnWorker",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("claudebot.bridge.BridgeService", "ExecuteOnWorker"),
+                );
+            self.inner.server_streaming(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -346,6 +665,48 @@ pub mod bridge_service_server {
             request: tonic::Request<super::FileReadRequest>,
         ) -> std::result::Result<
             tonic::Response<super::FileReadResponse>,
+            tonic::Status,
+        >;
+        /// Worker management
+        async fn spawn_worker(
+            &self,
+            request: tonic::Request<super::SpawnWorkerRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SpawnWorkerResponse>,
+            tonic::Status,
+        >;
+        async fn kill_worker(
+            &self,
+            request: tonic::Request<super::KillWorkerRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::KillWorkerResponse>,
+            tonic::Status,
+        >;
+        async fn list_workers(
+            &self,
+            request: tonic::Request<super::ListWorkersRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListWorkersResponse>,
+            tonic::Status,
+        >;
+        async fn worker_status(
+            &self,
+            request: tonic::Request<super::WorkerStatusRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::WorkerStatusResponse>,
+            tonic::Status,
+        >;
+        /// Server streaming response type for the ExecuteOnWorker method.
+        type ExecuteOnWorkerStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<super::ExecuteChunk, tonic::Status>,
+            >
+            + std::marker::Send
+            + 'static;
+        async fn execute_on_worker(
+            &self,
+            request: tonic::Request<super::ExecuteOnWorkerRequest>,
+        ) -> std::result::Result<
+            tonic::Response<Self::ExecuteOnWorkerStream>,
             tonic::Status,
         >;
     }
@@ -603,6 +964,234 @@ pub mod bridge_service_server {
                                 max_encoding_message_size,
                             );
                         let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/claudebot.bridge.BridgeService/SpawnWorker" => {
+                    #[allow(non_camel_case_types)]
+                    struct SpawnWorkerSvc<T: BridgeService>(pub Arc<T>);
+                    impl<
+                        T: BridgeService,
+                    > tonic::server::UnaryService<super::SpawnWorkerRequest>
+                    for SpawnWorkerSvc<T> {
+                        type Response = super::SpawnWorkerResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SpawnWorkerRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BridgeService>::spawn_worker(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SpawnWorkerSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/claudebot.bridge.BridgeService/KillWorker" => {
+                    #[allow(non_camel_case_types)]
+                    struct KillWorkerSvc<T: BridgeService>(pub Arc<T>);
+                    impl<
+                        T: BridgeService,
+                    > tonic::server::UnaryService<super::KillWorkerRequest>
+                    for KillWorkerSvc<T> {
+                        type Response = super::KillWorkerResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::KillWorkerRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BridgeService>::kill_worker(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = KillWorkerSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/claudebot.bridge.BridgeService/ListWorkers" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListWorkersSvc<T: BridgeService>(pub Arc<T>);
+                    impl<
+                        T: BridgeService,
+                    > tonic::server::UnaryService<super::ListWorkersRequest>
+                    for ListWorkersSvc<T> {
+                        type Response = super::ListWorkersResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListWorkersRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BridgeService>::list_workers(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListWorkersSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/claudebot.bridge.BridgeService/WorkerStatus" => {
+                    #[allow(non_camel_case_types)]
+                    struct WorkerStatusSvc<T: BridgeService>(pub Arc<T>);
+                    impl<
+                        T: BridgeService,
+                    > tonic::server::UnaryService<super::WorkerStatusRequest>
+                    for WorkerStatusSvc<T> {
+                        type Response = super::WorkerStatusResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::WorkerStatusRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BridgeService>::worker_status(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = WorkerStatusSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/claudebot.bridge.BridgeService/ExecuteOnWorker" => {
+                    #[allow(non_camel_case_types)]
+                    struct ExecuteOnWorkerSvc<T: BridgeService>(pub Arc<T>);
+                    impl<
+                        T: BridgeService,
+                    > tonic::server::ServerStreamingService<
+                        super::ExecuteOnWorkerRequest,
+                    > for ExecuteOnWorkerSvc<T> {
+                        type Response = super::ExecuteChunk;
+                        type ResponseStream = T::ExecuteOnWorkerStream;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::ResponseStream>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ExecuteOnWorkerRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BridgeService>::execute_on_worker(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ExecuteOnWorkerSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.server_streaming(method, req).await;
                         Ok(res)
                     };
                     Box::pin(fut)

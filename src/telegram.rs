@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use teloxide::{
     dispatching::{Dispatcher, UpdateFilterExt},
     dptree,
@@ -24,15 +25,18 @@ use teloxide::{
     prelude::*,
     types::Update,
 };
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::bridge::GrpcBridgeClient;
 use crate::conversation::ConversationStore;
+use crate::feedback::{OutputParser, TaskFeedback};
 use crate::graph::GraphStore;
 use crate::lifecycle::{LifecycleManager, LifecycleConfig, LifecycleCallbacks, ProcessingGuard};
 use crate::llama_worker::LlamaWorker;
 use crate::memory::MemoryStore;
 use crate::permissions::PermissionManager;
+use crate::preflight::PreflightChecker;
 use crate::tokenizer::{TokenCounter, BudgetCheck};
 use crate::usage::{format_tokens, LimitCheck, UsageRecord, UsageTracker, UserLimits};
 
@@ -165,6 +169,16 @@ pub async fn run_telegram_bot() -> Result<()> {
         }
     };
 
+    // Initialize pre-flight checker
+    let preflight_checker = PreflightChecker::new();
+
+    // Quick check that claude CLI exists at startup
+    if !preflight_checker.check_claude_cli().await {
+        tracing::error!("Claude CLI not found! Install with: npm install -g @anthropic-ai/claude-code");
+    } else {
+        tracing::info!("Pre-flight checker: Claude CLI available");
+    }
+
     let handler_data = Arc::new(BotData {
         allowed_users,
         base_working_dir: working_dir,
@@ -177,6 +191,7 @@ pub async fn run_telegram_bot() -> Result<()> {
         lifecycle: Arc::clone(&lifecycle),
         permission_manager,
         bridge_client,
+        preflight_checker,
     });
 
     // Auto-load system context on startup
@@ -257,6 +272,7 @@ struct BotData {
     lifecycle: Arc<LifecycleManager>,
     permission_manager: PermissionManager,
     bridge_client: Option<GrpcBridgeClient>,
+    preflight_checker: PreflightChecker,
 }
 
 impl BotData {
@@ -296,8 +312,14 @@ struct ClaudeResponse {
     session_id: Option<String>,
 }
 
+/// Timeout configuration for Claude CLI execution
+const SILENCE_WARNING_SECS: u64 = 30;
+const TOTAL_TIMEOUT_SECS: u64 = 300; // 5 minutes
+
 /// Invoke Claude Code CLI with JSON output for usage tracking
+/// Includes silence detection and total timeout handling
 async fn invoke_claude_cli(prompt: &str, working_dir: &PathBuf, autonomous: bool) -> Result<ClaudeResponse> {
+    let start = Instant::now();
     tracing::debug!("Invoking claude CLI with prompt length: {}, autonomous: {}", prompt.len(), autonomous);
 
     // Test mode: echo back without calling Claude CLI
@@ -321,7 +343,9 @@ async fn invoke_claude_cli(prompt: &str, working_dir: &PathBuf, autonomous: bool
     cmd.arg("-p")
         .arg(prompt)
         .arg("--output-format")
-        .arg("json");
+        .arg("json")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
 
     // Skip permission prompts in autonomous mode
     if autonomous {
@@ -339,22 +363,143 @@ async fn invoke_claude_cli(prompt: &str, working_dir: &PathBuf, autonomous: bool
         }
     }
 
-    let output = cmd
+    let mut child = cmd
         .current_dir(working_dir)
-        .output()
-        .await
-        .context("Failed to execute claude CLI")?;
+        .spawn()
+        .context("Failed to spawn claude CLI")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::error!("Claude CLI error: {}", stderr);
-        anyhow::bail!("Claude CLI failed: {}", stderr);
+    // Take stdout/stderr for monitoring
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let mut all_stdout = String::new();
+    let mut all_stderr = String::new();
+    let mut last_output_time = Instant::now();
+    let mut silence_warned = false;
+
+    // Set up readers
+    let mut stdout_reader = stdout.map(|s| BufReader::new(s).lines());
+    let mut stderr_reader = stderr.map(|s| BufReader::new(s).lines());
+
+    // Monitor output with timeout
+    loop {
+        let elapsed = start.elapsed();
+
+        // Check total timeout
+        if elapsed.as_secs() >= TOTAL_TIMEOUT_SECS {
+            tracing::warn!("Claude CLI total timeout ({} seconds)", TOTAL_TIMEOUT_SECS);
+            let _ = child.kill().await;
+            let duration = start.elapsed();
+            return Err(anyhow::anyhow!(
+                "{}",
+                TaskFeedback::format_timeout(duration, Some(&all_stdout))
+            ));
+        }
+
+        // Check silence timeout
+        let silence_duration = last_output_time.elapsed();
+        if silence_duration.as_secs() >= SILENCE_WARNING_SECS && !silence_warned {
+            tracing::warn!("Claude CLI silent for {} seconds", silence_duration.as_secs());
+            silence_warned = true;
+            // Don't bail yet, just warn - the process might still be working
+        }
+
+        // Use select to read from stdout/stderr with timeout
+        tokio::select! {
+            // Check for stdout line
+            line = async {
+                if let Some(ref mut reader) = stdout_reader {
+                    reader.next_line().await
+                } else {
+                    // No stdout, wait forever (other branches will trigger)
+                    std::future::pending().await
+                }
+            } => {
+                match line {
+                    Ok(Some(line)) => {
+                        all_stdout.push_str(&line);
+                        all_stdout.push('\n');
+                        last_output_time = Instant::now();
+                        silence_warned = false;
+                        tracing::trace!("stdout: {}", &line[..line.len().min(100)]);
+                    }
+                    Ok(None) => {
+                        // stdout closed
+                        stdout_reader = None;
+                    }
+                    Err(e) => {
+                        tracing::warn!("stdout read error: {}", e);
+                        stdout_reader = None;
+                    }
+                }
+            }
+
+            // Check for stderr line
+            line = async {
+                if let Some(ref mut reader) = stderr_reader {
+                    reader.next_line().await
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+                match line {
+                    Ok(Some(line)) => {
+                        all_stderr.push_str(&line);
+                        all_stderr.push('\n');
+                        last_output_time = Instant::now();
+                        silence_warned = false;
+                        tracing::trace!("stderr: {}", &line[..line.len().min(100)]);
+                    }
+                    Ok(None) => {
+                        stderr_reader = None;
+                    }
+                    Err(e) => {
+                        tracing::warn!("stderr read error: {}", e);
+                        stderr_reader = None;
+                    }
+                }
+            }
+
+            // Check process status
+            status = child.wait() => {
+                let status = status.context("Failed to wait for claude CLI")?;
+                let duration = start.elapsed();
+                tracing::info!("Claude CLI completed in {:?} with status: {:?}", duration, status);
+
+                if !status.success() {
+                    let hint = OutputParser::extract_error_hint(&all_stderr);
+                    return Err(anyhow::anyhow!(
+                        "{}",
+                        TaskFeedback::format_error(&all_stderr.trim(), hint.as_deref())
+                    ));
+                }
+
+                // Process completed - parse output
+                break;
+            }
+
+            // Periodic check (every 100ms)
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                // Just continue the loop for timeout checks
+            }
+        }
+
+        // If both streams closed, wait for process
+        if stdout_reader.is_none() && stderr_reader.is_none() {
+            let status = child.wait().await.context("Failed to wait for claude CLI")?;
+            if !status.success() {
+                let hint = OutputParser::extract_error_hint(&all_stderr);
+                return Err(anyhow::anyhow!(
+                    "{}",
+                    TaskFeedback::format_error(&all_stderr.trim(), hint.as_deref())
+                ));
+            }
+            break;
+        }
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
     // Try to parse JSON output
-    match serde_json::from_str::<ClaudeJsonOutput>(&stdout) {
+    match serde_json::from_str::<ClaudeJsonOutput>(&all_stdout) {
         Ok(json) => {
             let usage = json.usage.unwrap_or_default();
 
@@ -376,7 +521,7 @@ async fn invoke_claude_cli(prompt: &str, working_dir: &PathBuf, autonomous: bool
         }
         Err(_) => {
             // Fall back to plain text if JSON parsing fails
-            let clean = strip_ansi_codes(&stdout);
+            let clean = strip_ansi_codes(&all_stdout);
             Ok(ClaudeResponse {
                 text: clean,
                 input_tokens: 0,
@@ -453,6 +598,19 @@ async fn handle_text(
     if let Err(msg) = check_user_limits(data, user_id) {
         bot.send_message(chat_id, msg).await?;
         return Ok(());
+    }
+
+    // Pre-flight check: verify required tools/credentials for this command
+    let preflight = data.preflight_checker.check_for_command(text).await;
+    if !preflight.ready {
+        bot.send_message(chat_id, preflight.format_error()).await?;
+        return Ok(());
+    }
+
+    // Show warnings but continue
+    if !preflight.warnings.is_empty() {
+        let warnings = preflight.format_warnings();
+        tracing::warn!("Preflight warnings for user {}: {}", user_id, warnings);
     }
 
     // Send typing indicator
@@ -604,7 +762,8 @@ async fn handle_command(
                 /usage - View token usage\n\
                 /limits - View/set limits\n\
                 /stats - System statistics\n\
-                /status - Check bot status\n\n\
+                /status - Check bot status\n\
+                /preflight [cmd] - Check tool availability\n\n\
                 Permissions:\n\
                 /autonomous [duration] - Full access mode\n\
                 /supervised - Require approval\n\
@@ -632,6 +791,30 @@ async fn handle_command(
                     bot.send_message(chat_id, "Claude CLI not available").await?;
                 }
             }
+        }
+
+        "/preflight" => {
+            bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await?;
+
+            let result = if args.is_empty() {
+                // Check all tools and credentials
+                data.preflight_checker.check_all().await
+            } else {
+                // Check for specific command
+                data.preflight_checker.check_for_command(args).await
+            };
+
+            let mut msg = if result.ready {
+                "Pre-flight Check: PASSED\n\nAll required tools and credentials available.\n".to_string()
+            } else {
+                format!("Pre-flight Check: FAILED\n\n{}", result.format_error())
+            };
+
+            if !result.warnings.is_empty() {
+                msg.push_str(&format!("\n{}", result.format_warnings()));
+            }
+
+            bot.send_message(chat_id, msg).await?;
         }
 
         "/stats" => {
