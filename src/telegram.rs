@@ -14,6 +14,7 @@
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,10 +24,11 @@ use teloxide::{
     error_handlers::LoggingErrorHandler,
     net::Download,
     prelude::*,
-    types::Update,
+    types::{ParseMode, Update},
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::RwLock;
 
 use crate::bridge::GrpcBridgeClient;
 use crate::conversation::ConversationStore;
@@ -37,6 +39,10 @@ use crate::llama_worker::LlamaWorker;
 use crate::memory::MemoryStore;
 use crate::permissions::PermissionManager;
 use crate::preflight::PreflightChecker;
+use crate::telegram_ui::{
+    ButtonAction, ConversationContext as UiContext, ContextParser, Intent,
+    ProgressManager, suggest_next_actions, suggestions_keyboard,
+};
 use crate::tokenizer::{TokenCounter, BudgetCheck};
 use crate::usage::{format_tokens, LimitCheck, UsageRecord, UsageTracker, UserLimits};
 
@@ -192,6 +198,9 @@ pub async fn run_telegram_bot() -> Result<()> {
         permission_manager,
         bridge_client,
         preflight_checker,
+        // Phase 6: Initialize advanced UX components
+        ui_contexts: RwLock::new(HashMap::new()),
+        progress_manager: ProgressManager::new(),
     });
 
     // Auto-load system context on startup
@@ -208,11 +217,15 @@ pub async fn run_telegram_bot() -> Result<()> {
         lifecycle_clone.run(LifecycleCallbacks::default()).await;
     });
 
-    // Build explicit handler tree
+    // Build explicit handler tree with callback query support
     let handler = dptree::entry()
         .branch(
             Update::filter_message()
                 .endpoint(message_handler)
+        )
+        .branch(
+            Update::filter_callback_query()
+                .endpoint(callback_handler)
         );
 
     tracing::info!("Starting dispatcher with long polling...");
@@ -260,6 +273,186 @@ async fn message_handler(
     Ok(())
 }
 
+/// Callback query handler for inline keyboard buttons
+async fn callback_handler(
+    bot: Bot,
+    query: CallbackQuery,
+    data: Arc<BotData>,
+) -> ResponseResult<()> {
+    let user_id = query.from.id.0 as i64;
+
+    // Check if user is allowed
+    if !data.is_allowed(user_id) {
+        bot.answer_callback_query(&query.id)
+            .text("Unauthorized")
+            .await?;
+        return Ok(());
+    }
+
+    let callback_data = match &query.data {
+        Some(d) => d.clone(),
+        None => {
+            bot.answer_callback_query(&query.id).await?;
+            return Ok(());
+        }
+    };
+
+    let chat_id = query.message.as_ref().map(|m| m.chat().id);
+
+    tracing::info!("Callback query: user={}, data={}", user_id, callback_data);
+
+    // Parse button action
+    if let Some(action) = ButtonAction::decode(&callback_data) {
+        match action {
+            ButtonAction::ViewLogs(task_id) => {
+                // Get task logs from progress manager
+                if let Some(tracker) = data.progress_manager.get(&task_id).await {
+                    let msg = tracker.format();
+                    bot.answer_callback_query(&query.id)
+                        .text("Showing logs")
+                        .await?;
+                    if let Some(cid) = chat_id {
+                        bot.send_message(cid, msg)
+                            .parse_mode(ParseMode::Html)
+                            .await?;
+                    }
+                } else {
+                    bot.answer_callback_query(&query.id)
+                        .text("Task not found")
+                        .await?;
+                }
+            }
+
+            ButtonAction::CancelTask(task_id) => {
+                // Mark task as cancelled
+                data.progress_manager.update(&task_id, |tracker| {
+                    tracker.fail("Cancelled by user");
+                }).await;
+                bot.answer_callback_query(&query.id)
+                    .text("Task cancelled")
+                    .await?;
+            }
+
+            ButtonAction::RetryTask(_task_id) => {
+                // Get last command from context and retry
+                if let Some(cid) = chat_id {
+                    let ctx = data.get_ui_context(cid.0).await;
+                    if let Some(ref cmd) = ctx.last_command {
+                        bot.answer_callback_query(&query.id)
+                            .text("Retrying...")
+                            .await?;
+                        // Re-execute the command
+                        let working_dir = data.working_dir_for_user(user_id);
+                        let is_autonomous = matches!(
+                            data.permission_manager.get_status(user_id).level,
+                            crate::permissions::PermissionLevel::Autonomous
+                        );
+                        if let Ok(response) = invoke_claude_cli(cmd, &working_dir, is_autonomous).await {
+                            let _ = send_long_message(&bot, cid, &response.text).await;
+                        }
+                    } else {
+                        bot.answer_callback_query(&query.id)
+                            .text("No previous command to retry")
+                            .await?;
+                    }
+                }
+            }
+
+            ButtonAction::ShowDiff => {
+                if let Some(cid) = chat_id {
+                    let ctx = data.get_ui_context(cid.0).await;
+                    if let Some(ref diff) = ctx.last_diff {
+                        bot.answer_callback_query(&query.id).await?;
+                        let _ = send_long_message(&bot, cid, &format!("Recent changes:\n```\n{}\n```", diff)).await;
+                    } else {
+                        bot.answer_callback_query(&query.id)
+                            .text("No diff available")
+                            .await?;
+                    }
+                }
+            }
+
+            ButtonAction::ShowError => {
+                if let Some(cid) = chat_id {
+                    let ctx = data.get_ui_context(cid.0).await;
+                    if let Some(ref error) = ctx.last_error {
+                        bot.answer_callback_query(&query.id).await?;
+                        let _ = send_long_message(&bot, cid, &format!("Last error:\n{}", error)).await;
+                    } else {
+                        bot.answer_callback_query(&query.id)
+                            .text("No error recorded")
+                            .await?;
+                    }
+                }
+            }
+
+            ButtonAction::Confirm(action_id) => {
+                if let Some(cid) = chat_id {
+                    data.update_ui_context(cid.0, |ctx| {
+                        ctx.clear_confirmation();
+                    }).await;
+                    bot.answer_callback_query(&query.id)
+                        .text("Confirmed")
+                        .await?;
+                    // Execute the confirmed action
+                    bot.send_message(cid, format!("Action {} confirmed. Executing...", action_id)).await?;
+                }
+            }
+
+            ButtonAction::Deny(action_id) => {
+                if let Some(cid) = chat_id {
+                    data.update_ui_context(cid.0, |ctx| {
+                        ctx.clear_confirmation();
+                    }).await;
+                    bot.answer_callback_query(&query.id)
+                        .text("Cancelled")
+                        .await?;
+                    bot.send_message(cid, format!("Action {} cancelled.", action_id)).await?;
+                }
+            }
+
+            ButtonAction::SelectOption(option_id) => {
+                bot.answer_callback_query(&query.id)
+                    .text(&format!("Selected: {}", option_id))
+                    .await?;
+            }
+
+            ButtonAction::PauseTask(_) | ButtonAction::ResumeTask(_) => {
+                bot.answer_callback_query(&query.id)
+                    .text("Not implemented yet")
+                    .await?;
+            }
+        }
+    } else if callback_data.starts_with("suggest:") {
+        // Handle suggestion callbacks
+        let cmd = callback_data.strip_prefix("suggest:").unwrap_or("");
+        if let Some(cid) = chat_id {
+            bot.answer_callback_query(&query.id)
+                .text("Executing suggestion...")
+                .await?;
+            // Execute suggested command
+            let working_dir = data.working_dir_for_user(user_id);
+            let is_autonomous = matches!(
+                data.permission_manager.get_status(user_id).level,
+                crate::permissions::PermissionLevel::Autonomous
+            );
+            if let Ok(response) = invoke_claude_cli(cmd, &working_dir, is_autonomous).await {
+                let _ = send_long_message(&bot, cid, &response.text).await;
+            }
+        }
+    } else if callback_data.starts_with("wkill:") {
+        // Worker kill
+        let worker_id = callback_data.strip_prefix("wkill:").unwrap_or("");
+        bot.answer_callback_query(&query.id)
+            .text(&format!("Worker {} kill requested", worker_id))
+            .await?;
+    } else {
+        bot.answer_callback_query(&query.id).await?;
+    }
+
+    Ok(())
+}
+
 struct BotData {
     allowed_users: Vec<i64>,
     base_working_dir: PathBuf,
@@ -273,6 +466,9 @@ struct BotData {
     permission_manager: PermissionManager,
     bridge_client: Option<GrpcBridgeClient>,
     preflight_checker: PreflightChecker,
+    // Phase 6: Advanced UX components
+    ui_contexts: RwLock<HashMap<i64, UiContext>>,  // Per-chat UI context
+    progress_manager: ProgressManager,
 }
 
 impl BotData {
@@ -294,10 +490,20 @@ impl BotData {
             .unwrap_or(f64::MAX)
     }
 
-    /// Estimate cost before sending request
-    fn estimate_cost(&self, input: &str, model: &crate::router::ModelHint) -> BudgetCheck {
-        let remaining = 20.0; // Default daily budget
-        self.token_counter.check_budget(input, 1000, model, remaining, 0.5)
+    /// Get or create UI context for a chat
+    async fn get_ui_context(&self, chat_id: i64) -> UiContext {
+        let contexts = self.ui_contexts.read().await;
+        contexts.get(&chat_id).cloned().unwrap_or_default()
+    }
+
+    /// Update UI context for a chat
+    async fn update_ui_context<F>(&self, chat_id: i64, f: F)
+    where
+        F: FnOnce(&mut UiContext),
+    {
+        let mut contexts = self.ui_contexts.write().await;
+        let ctx = contexts.entry(chat_id).or_default();
+        f(ctx);
     }
 }
 
@@ -594,6 +800,102 @@ async fn handle_text(
         return handle_command(bot, chat_id, data, text, working_dir, user_id).await;
     }
 
+    // Get UI context for this chat
+    let ui_ctx = data.get_ui_context(chat_id.0).await;
+
+    // Phase 6: Check for intent-based shortcuts (e.g., "again", "fix it", "cancel")
+    if let Some(intent) = ContextParser::detect_intent(text, &ui_ctx) {
+        match intent {
+            Intent::Retry(cmd) => {
+                bot.send_message(chat_id, format!("Retrying: {}", truncate(&cmd, 50))).await?;
+                let is_autonomous = matches!(
+                    data.permission_manager.get_status(user_id).level,
+                    crate::permissions::PermissionLevel::Autonomous
+                );
+                match invoke_claude_cli(&cmd, working_dir, is_autonomous).await {
+                    Ok(response) => {
+                        record_usage(data, user_id, &response);
+                        send_long_message(bot, chat_id, &response.text).await?;
+                    }
+                    Err(e) => {
+                        let error_msg = e.to_string();
+                        data.update_ui_context(chat_id.0, |ctx| ctx.set_error(&error_msg)).await;
+                        bot.send_message(chat_id, format!("Retry failed: {}", error_msg)).await?;
+                    }
+                }
+                return Ok(());
+            }
+            Intent::FixError(error) => {
+                let fix_prompt = format!("Fix this error:\n{}\n\nApply the necessary fixes.", error);
+                bot.send_message(chat_id, "Attempting to fix the error...").await?;
+                let is_autonomous = matches!(
+                    data.permission_manager.get_status(user_id).level,
+                    crate::permissions::PermissionLevel::Autonomous
+                );
+                match invoke_claude_cli(&fix_prompt, working_dir, is_autonomous).await {
+                    Ok(response) => {
+                        record_usage(data, user_id, &response);
+                        send_long_message(bot, chat_id, &response.text).await?;
+                    }
+                    Err(e) => {
+                        bot.send_message(chat_id, format!("Auto-fix failed: {}", e)).await?;
+                    }
+                }
+                return Ok(());
+            }
+            Intent::Cancel(task_id) => {
+                data.progress_manager.update(&task_id, |tracker| {
+                    tracker.fail("Cancelled by user");
+                }).await;
+                bot.send_message(chat_id, "Task cancelled.").await?;
+                return Ok(());
+            }
+            Intent::Confirm => {
+                data.update_ui_context(chat_id.0, |ctx| ctx.clear_confirmation()).await;
+                bot.send_message(chat_id, "Confirmed.").await?;
+                return Ok(());
+            }
+            Intent::Deny => {
+                data.update_ui_context(chat_id.0, |ctx| ctx.clear_confirmation()).await;
+                bot.send_message(chat_id, "Cancelled.").await?;
+                return Ok(());
+            }
+            Intent::ShowDiff => {
+                if let Some(ref diff) = ui_ctx.last_diff {
+                    send_long_message(bot, chat_id, &format!("Recent changes:\n```\n{}\n```", diff)).await?;
+                } else {
+                    bot.send_message(chat_id, "No recent diff available.").await?;
+                }
+                return Ok(());
+            }
+            Intent::ShowError => {
+                if let Some(ref error) = ui_ctx.last_error {
+                    send_long_message(bot, chat_id, &format!("Last error:\n{}", error)).await?;
+                } else {
+                    bot.send_message(chat_id, "No recent error recorded.").await?;
+                }
+                return Ok(());
+            }
+            Intent::ShowLogs => {
+                if let Some(ref task_id) = ui_ctx.last_task_id {
+                    if let Some(tracker) = data.progress_manager.get(task_id).await {
+                        bot.send_message(chat_id, tracker.format())
+                            .parse_mode(ParseMode::Html)
+                            .await?;
+                    } else {
+                        bot.send_message(chat_id, "No active task logs.").await?;
+                    }
+                } else {
+                    bot.send_message(chat_id, "No recent task to show logs for.").await?;
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    // Phase 6: Expand context references (e.g., "that file" -> actual path)
+    let expanded_text = ContextParser::expand(text, &ui_ctx);
+
     // Check limits before processing
     if let Err(msg) = check_user_limits(data, user_id) {
         bot.send_message(chat_id, msg).await?;
@@ -601,7 +903,7 @@ async fn handle_text(
     }
 
     // Pre-flight check: verify required tools/credentials for this command
-    let preflight = data.preflight_checker.check_for_command(text).await;
+    let preflight = data.preflight_checker.check_for_command(&expanded_text).await;
     if !preflight.ready {
         bot.send_message(chat_id, preflight.format_error()).await?;
         return Ok(());
@@ -616,17 +918,22 @@ async fn handle_text(
     // Send typing indicator
     bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await?;
 
+    // Store the command in context for "again" support
+    data.update_ui_context(chat_id.0, |ctx| {
+        ctx.set_command(&expanded_text);
+    }).await;
+
     // Get conversation history for this chat (last 10 messages)
     let conversation_context = get_conversation_context(data, chat_id.0);
 
     // Inject relevant memory context (semantic facts)
-    let memory_context = get_memory_context(data, text);
+    let memory_context = get_memory_context(data, &expanded_text);
 
     // Build enhanced prompt with conversation history + memory facts
     let enhanced_prompt = if conversation_context.is_empty() && memory_context.is_empty() {
-        text.to_string()
+        expanded_text.clone()
     } else {
-        format!("{}{}{}", conversation_context, text, memory_context)
+        format!("{}{}{}", conversation_context, expanded_text, memory_context)
     };
 
     // Pre-flight token estimation
@@ -667,21 +974,112 @@ async fn handle_text(
     );
 
     // Process with Claude Code CLI
-    let response = invoke_claude_cli(&enhanced_prompt, working_dir, is_autonomous).await?;
+    let result = invoke_claude_cli(&enhanced_prompt, working_dir, is_autonomous).await;
 
-    // Record usage
-    record_usage(data, user_id, &response);
+    match result {
+        Ok(response) => {
+            // Record usage
+            record_usage(data, user_id, &response);
 
-    // Store conversation exchange (user message + assistant response)
-    store_conversation_exchange(data, chat_id.0, text, &response.text);
+            // Store conversation exchange (user message + assistant response)
+            store_conversation_exchange(data, chat_id.0, text, &response.text);
 
-    // Extract facts for continuous learning
-    extract_and_learn_facts(data, &response.text, user_id);
+            // Extract facts for continuous learning
+            extract_and_learn_facts(data, &response.text, user_id);
 
-    // Send response
-    send_long_message(bot, chat_id, &response.text).await?;
+            // Phase 6: Detect if response contains file paths or diffs for context
+            let has_changes = response.text.contains("diff") ||
+                              response.text.contains("modified") ||
+                              response.text.contains("created") ||
+                              response.text.contains("Changed ");
+
+            // Extract file paths mentioned in response
+            if let Some(file_path) = extract_file_path(&response.text) {
+                data.update_ui_context(chat_id.0, |ctx| ctx.set_file(&file_path)).await;
+            }
+
+            // Extract diff if present
+            if let Some(diff) = extract_diff(&response.text) {
+                data.update_ui_context(chat_id.0, |ctx| ctx.set_diff(&diff)).await;
+            }
+
+            // Send response
+            send_long_message(bot, chat_id, &response.text).await?;
+
+            // Phase 6: Generate and show suggestions after task completion
+            let suggestions = suggest_next_actions(&expanded_text, true, has_changes);
+            if !suggestions.is_empty() {
+                if let Some(keyboard) = suggestions_keyboard(&suggestions) {
+                    bot.send_message(chat_id, "Suggestions:")
+                        .reply_markup(keyboard)
+                        .await?;
+                }
+            }
+        }
+        Err(e) => {
+            // Store error in context for "fix it" support
+            let error_msg = e.to_string();
+            data.update_ui_context(chat_id.0, |ctx| ctx.set_error(&error_msg)).await;
+
+            // Send error with suggestion to fix
+            bot.send_message(chat_id, &error_msg).await?;
+
+            // Show error-related suggestions
+            let suggestions = suggest_next_actions(&expanded_text, false, false);
+            if !suggestions.is_empty() {
+                if let Some(keyboard) = suggestions_keyboard(&suggestions) {
+                    bot.send_message(chat_id, "What would you like to do?")
+                        .reply_markup(keyboard)
+                        .await?;
+                }
+            }
+        }
+    }
 
     Ok(())
+}
+
+/// Extract file path from response text
+fn extract_file_path(text: &str) -> Option<String> {
+    // Look for common file path patterns
+    let patterns = [
+        r#"(?:created|modified|reading|wrote|saved)\s+[`'"]?([/\w\-_.]+\.[a-z]+)[`'"]?"#,
+        r#"File:\s*[`'"]?([/\w\-_.]+\.[a-z]+)[`'"]?"#,
+        r"([/\w\-_]+/[a-z_]+\.[a-z]+)",
+    ];
+
+    for pattern in &patterns {
+        if let Ok(re) = regex::Regex::new(pattern) {
+            if let Some(caps) = re.captures(text) {
+                if let Some(path) = caps.get(1) {
+                    return Some(path.as_str().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract diff from response text
+fn extract_diff(text: &str) -> Option<String> {
+    // Look for diff blocks
+    if let Some(start) = text.find("```diff") {
+        if let Some(end) = text[start..].find("```\n") {
+            let diff = &text[start + 7..start + end];
+            return Some(diff.trim().to_string());
+        }
+    }
+    // Look for unified diff format
+    if text.contains("@@") && (text.contains("+") || text.contains("-")) {
+        let lines: Vec<&str> = text.lines()
+            .filter(|l| l.starts_with('+') || l.starts_with('-') || l.starts_with("@@"))
+            .take(20)
+            .collect();
+        if !lines.is_empty() {
+            return Some(lines.join("\n"));
+        }
+    }
+    None
 }
 
 fn check_user_limits(data: &BotData, user_id: i64) -> std::result::Result<(), String> {
@@ -815,6 +1213,93 @@ async fn handle_command(
             }
 
             bot.send_message(chat_id, msg).await?;
+        }
+
+        "/ghcheck" | "/gh" => {
+            bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await?;
+
+            // Check if gh CLI is installed
+            let gh_version = Command::new("gh")
+                .arg("--version")
+                .output()
+                .await;
+
+            match gh_version {
+                Ok(output) if output.status.success() => {
+                    let version = String::from_utf8_lossy(&output.stdout);
+
+                    // Check auth status
+                    let auth_check = Command::new("gh")
+                        .arg("auth")
+                        .arg("status")
+                        .output()
+                        .await;
+
+                    let auth_status = match auth_check {
+                        Ok(auth_output) => {
+                            if auth_output.status.success() {
+                                let stdout = String::from_utf8_lossy(&auth_output.stdout);
+                                let stderr = String::from_utf8_lossy(&auth_output.stderr);
+                                // gh auth status outputs to stderr
+                                let combined = format!("{}{}", stdout, stderr);
+                                if combined.contains("Logged in") {
+                                    "Authenticated"
+                                } else {
+                                    "Not authenticated"
+                                }
+                            } else {
+                                "Not authenticated"
+                            }
+                        }
+                        Err(_) => "Auth check failed",
+                    };
+
+                    // Try to get user info if authenticated
+                    let user_info = if auth_status == "Authenticated" {
+                        match Command::new("gh")
+                            .arg("api")
+                            .arg("user")
+                            .arg("--jq")
+                            .arg(".login")
+                            .output()
+                            .await
+                        {
+                            Ok(user_output) if user_output.status.success() => {
+                                let user = String::from_utf8_lossy(&user_output.stdout).trim().to_string();
+                                format!("User: {}", user)
+                            }
+                            _ => String::new(),
+                        }
+                    } else {
+                        String::new()
+                    };
+
+                    let msg = format!(
+                        "GitHub CLI Status\n\n\
+                        Version: {}\n\
+                        Auth: {}\n\
+                        {}\n\n\
+                        Commands:\n\
+                        - gh auth login - Authenticate\n\
+                        - gh repo list - List repos\n\
+                        - gh pr list - List PRs",
+                        version.lines().next().unwrap_or("unknown"),
+                        auth_status,
+                        user_info
+                    );
+                    bot.send_message(chat_id, msg).await?;
+                }
+                _ => {
+                    bot.send_message(chat_id,
+                        "GitHub CLI not installed.\n\n\
+                        Install with:\n\
+                        - Arch: sudo pacman -S github-cli\n\
+                        - Debian: sudo apt install gh\n\
+                        - macOS: brew install gh\n\n\
+                        Then run: gh auth login"
+                    ).await?;
+                }
+            }
         }
 
         "/stats" => {
