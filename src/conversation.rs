@@ -181,9 +181,16 @@ impl ConversationStore {
         let mut context = String::from("\n\n[Previous conversation:]\n");
         for msg in messages {
             let role_label = if msg.role == "user" { "User" } else { "Assistant" };
-            // Truncate very long messages in history
+            // Truncate very long messages in history (UTF-8 safe)
             let content = if msg.content.len() > 500 {
-                format!("{}...", &msg.content[..500])
+                // Find a safe UTF-8 boundary near 500 bytes
+                let truncate_at = msg.content
+                    .char_indices()
+                    .take_while(|(i, _)| *i < 500)
+                    .last()
+                    .map(|(i, c)| i + c.len_utf8())
+                    .unwrap_or(500.min(msg.content.len()));
+                format!("{}...", &msg.content[..truncate_at])
             } else {
                 msg.content.clone()
             };

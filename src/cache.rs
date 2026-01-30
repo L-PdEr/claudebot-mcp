@@ -93,10 +93,26 @@ impl ResponseCache {
             return content.to_string();
         }
 
+        // Find safe UTF-8 boundaries
+        let start_end = content
+            .char_indices()
+            .take_while(|(i, _)| *i < 100)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(100.min(len));
+
+        let end_start = content
+            .char_indices()
+            .rev()
+            .take_while(|(i, _)| len - *i < 100)
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(len.saturating_sub(100));
+
         format!(
             "{}...{}#{}",
-            &content[..100],
-            &content[len - 100..],
+            &content[..start_end],
+            &content[end_start..],
             len
         )
     }

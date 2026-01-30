@@ -1102,9 +1102,15 @@ fn format_circle_result(result: &PipelineResult) -> String {
             msg.push_str(&format!("Files: {}\n", phase.files_changed.join(", ")));
         }
 
-        // Truncate output for readability
+        // Truncate output for readability (UTF-8 safe)
         let output = if phase.output.len() > 500 {
-            format!("{}...\n[truncated]", &phase.output[..500])
+            let truncate_at = phase.output
+                .char_indices()
+                .take_while(|(i, _)| *i < 500)
+                .last()
+                .map(|(i, c)| i + c.len_utf8())
+                .unwrap_or(500.min(phase.output.len()));
+            format!("{}...\n[truncated]", &phase.output[..truncate_at])
         } else {
             phase.output.clone()
         };
