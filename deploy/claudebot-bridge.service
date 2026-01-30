@@ -1,0 +1,31 @@
+[Unit]
+Description=ClaudeBot Bridge Server - AR
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/eliot/workspace
+
+# Environment
+Environment=RUST_LOG=info
+Environment=BRIDGE_GRPC_PORT=9998
+Environment=BRIDGE_API_KEY=466fef09330a7240036ad8e628ccb8e6
+Environment=BRIDGE_WORKING_DIR=/home/eliot/workspace
+Environment=BRIDGE_TIMEOUT=300
+Environment=PATH=/home/eliot/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+
+# Run bridge server
+ExecStart=/home/eliot/personal/dev/claudebot-mcp/target/release/claudebot-mcp --grpc-server
+
+# Restart policy
+Restart=always
+RestartSec=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=claudebot-bridge
+
+[Install]
+WantedBy=default.target
