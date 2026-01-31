@@ -154,7 +154,7 @@ impl AutonomousLearner {
 
         // 2. Detect preferences from language patterns
         if self.config.learn_preferences {
-            if let Some(pref) = self.detect_preference(message, user_id) {
+            if let Some(pref) = self.detect_preference_sync(message, user_id) {
                 facts.push(pref);
             }
         }
@@ -326,8 +326,9 @@ Facts (JSON only, empty array if no facts):"#,
         }
     }
 
-    /// Detect preferences from language patterns
-    fn detect_preference(&self, message: &str, _user_id: i64) -> Option<LearnedFact> {
+    /// Detect preferences from language patterns (sync, no LLM)
+    /// This is a fast pattern-based detector that doesn't require Ollama.
+    pub fn detect_preference_sync(&self, message: &str, _user_id: i64) -> Option<LearnedFact> {
         let lower = message.to_lowercase();
 
         // Common preference patterns
@@ -396,7 +397,7 @@ mod tests {
         let learner = AutonomousLearner::new();
 
         let msg = "I prefer using Rust for systems programming";
-        let pref = learner.detect_preference(msg, 123);
+        let pref = learner.detect_preference_sync(msg, 123);
 
         assert!(pref.is_some());
         let fact = pref.unwrap();

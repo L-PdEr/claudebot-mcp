@@ -30,6 +30,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::RwLock;
 
+use crate::autonomous::{
+    AutonomousLearner, ContextManager, GoalTracker, FeedbackLoop,
+};
 use crate::bridge::GrpcBridgeClient;
 use crate::conversation::ConversationStore;
 use crate::feedback::{OutputParser, TaskFeedback};
@@ -222,7 +225,13 @@ pub async fn run_telegram_bot() -> Result<()> {
         // Interactive permissions
         interactive_permissions: RwLock::new(HashMap::new()),
         pending_permissions: RwLock::new(HashMap::new()),
+        // Phase 7: Autonomous behavior components
+        autonomous_learner: AutonomousLearner::new(),
+        context_manager: ContextManager::new(),
+        goal_tracker: GoalTracker::new(),
+        feedback_loop: FeedbackLoop::new(),
     });
+    tracing::info!("Autonomous behavior system initialized");
 
     // Auto-load system context on startup
     let context_result = load_context(&handler_data);
@@ -575,6 +584,11 @@ struct BotData {
     interactive_permissions: RwLock<HashMap<i64, bool>>,
     // Pending permission requests: request_id -> (chat_id, permission_description)
     pending_permissions: RwLock<HashMap<String, PendingPermission>>,
+    // Phase 7: Autonomous behavior components
+    autonomous_learner: AutonomousLearner,
+    context_manager: ContextManager,
+    goal_tracker: GoalTracker,
+    feedback_loop: FeedbackLoop,
 }
 
 /// Pending permission request waiting for user approval
@@ -1072,6 +1086,46 @@ async fn handle_text(
     // Phase 6: Expand context references (e.g., "that file" -> actual path)
     let expanded_text = ContextParser::expand(text, &ui_ctx);
 
+    // ===== Phase 7: Autonomous Processing (non-blocking) =====
+    // Runs in background to not block the response
+
+    // 7a. Auto-extract goals (non-async wrapper for pattern detection)
+    // Note: Goal extraction uses pattern matching, not LLM, so it's fast
+    let goals_fut = data.goal_tracker.extract_goals(&expanded_text, user_id);
+    let completion_fut = data.goal_tracker.auto_complete(&expanded_text, user_id);
+
+    // Run goal processing concurrently
+    let (extracted_goals, completed_goals) = tokio::join!(goals_fut, completion_fut);
+    if !extracted_goals.is_empty() {
+        tracing::info!("Auto-extracted {} goals from message", extracted_goals.len());
+    }
+    if !completed_goals.is_empty() {
+        tracing::info!("Auto-completed {} goals", completed_goals.len());
+    }
+
+    // 7c. Detect user corrections (sync detection, async learning)
+    if let Some(correction) = data.feedback_loop.detect_correction(&expanded_text) {
+        tracing::info!("Detected correction: {}", &correction[..correction.len().min(50)]);
+        let recent_memory_ids: Vec<String> = Vec::new();
+        if let Err(e) = data.feedback_loop.learn_correction(
+            &correction,
+            &recent_memory_ids,
+            &data.memory_store,
+            user_id
+        ).await {
+            tracing::debug!("Correction learning skipped: {}", e);
+        }
+    }
+
+    // 7d. Simple preference detection (no LLM needed)
+    // The autonomous_learner has a fast pattern-based preference detector
+    if let Some(pref) = data.autonomous_learner.detect_preference_sync(&expanded_text, user_id) {
+        if let Err(e) = data.autonomous_learner.store_facts(&[pref], user_id, &data.memory_store).await {
+            tracing::debug!("Failed to store preference: {}", e);
+        }
+    }
+    // ===== End Phase 7 =====
+
     // Check limits before processing
     if let Err(msg) = check_user_limits(data, user_id) {
         bot.send_message(chat_id, msg).await?;
@@ -1099,18 +1153,40 @@ async fn handle_text(
         ctx.set_command(&expanded_text);
     }).await;
 
-    // Get conversation history for this chat (last 10 messages)
-    let conversation_context = get_conversation_context(data, chat_id.0);
+    // Build enriched context using ContextManager (with HyDE, goals, identity)
+    let enriched_context = data.context_manager.build_context(
+        &expanded_text,
+        user_id,
+        chat_id.0,
+        &data.memory_store,
+        &data.conversation_store,
+        &data.graph_store,
+        Some(&data.goal_tracker),
+        &data.llama_worker,
+    ).await;
 
-    // Inject relevant memory context (semantic facts)
-    let memory_context = get_memory_context_async(data, &expanded_text).await;
+    // Track which memories were retrieved for feedback loop
+    let retrieved_memory_ids: Vec<String> = enriched_context.memories
+        .iter()
+        .map(|m| m.entry.id.clone())
+        .collect();
+    data.feedback_loop.record_retrieval(&retrieved_memory_ids).await;
 
-    // Build enhanced prompt with conversation history + memory facts
-    let enhanced_prompt = if conversation_context.is_empty() && memory_context.is_empty() {
+    // Build enhanced prompt with enriched context
+    let context_str = enriched_context.format_for_prompt();
+    let enhanced_prompt = if context_str.is_empty() {
         expanded_text.clone()
     } else {
-        format!("{}{}{}", conversation_context, expanded_text, memory_context)
+        format!("{}{}", expanded_text, context_str)
     };
+
+    tracing::debug!(
+        "Context: {} memories, {} entities, {} goals, ~{} tokens",
+        enriched_context.memories.len(),
+        enriched_context.entities.len(),
+        enriched_context.goals.len(),
+        enriched_context.estimated_tokens
+    );
 
     // Pre-flight token estimation
     let remaining_budget = data.get_remaining_budget(user_id);
