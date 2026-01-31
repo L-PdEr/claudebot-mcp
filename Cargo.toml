@@ -59,6 +59,10 @@ shellexpand = "3"
 # Caching
 moka = { version = "0.12", features = ["future"] }
 
+# Vector search (HNSW approximate nearest neighbor)
+hnsw = "0.11"
+space = "0.17"
+
 # Telegram Bot
 teloxide = { version = "0.13", features = ["macros"] }
 

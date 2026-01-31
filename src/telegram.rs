@@ -42,7 +42,7 @@ use crate::preflight::PreflightChecker;
 use crate::circle::{Circle, PipelineMode, PipelineResult};
 use crate::telegram_ui::{
     ButtonAction, ConversationContext as UiContext, ContextParser, Intent,
-    ProgressManager, suggest_next_actions, suggestions_keyboard,
+    ProgressManager,
 };
 use crate::tokenizer::{TokenCounter, BudgetCheck};
 use crate::usage::{format_tokens, LimitCheck, UsageRecord, UsageTracker, UserLimits};
@@ -103,7 +103,24 @@ pub async fn run_telegram_bot() -> Result<()> {
 
     // Initialize usage tracker, memory store, and conversation store
     let usage_tracker = UsageTracker::new(&usage_db_path)?;
-    let memory_store = MemoryStore::open(&memory_db_path)?;
+    let memory_store = MemoryStore::open_with_embeddings(&memory_db_path).await?;
+    
+    // Industry standard: Backfill embeddings on startup for semantic search
+    {
+        let stats = memory_store.embedding_stats()?;
+        tracing::info!(
+            "Memory store: {}/{} have embeddings ({:.1}% coverage)",
+            stats.with_embeddings, stats.total_memories, stats.coverage_percent
+        );
+        
+        if stats.without_embeddings > 0 && memory_store.has_embeddings() {
+            tracing::info!("Backfilling {} embeddings on startup...", stats.without_embeddings);
+            match memory_store.backfill_embeddings(100).await {
+                Ok(count) => tracing::info!("Backfilled {} embeddings", count),
+                Err(e) => tracing::warn!("Embedding backfill failed: {}", e),
+            }
+        }
+    }
     let conversation_store = ConversationStore::open(&conversation_db_path)?;
 
     tracing::info!("===========================================");
@@ -988,12 +1005,7 @@ async fn handle_text(
                 return Ok(());
             }
             Intent::ShowDiff => {
-                if let Some(ref diff) = ui_ctx.last_diff {
-                    send_long_message(bot, chat_id, &format!("Recent changes:\n```\n{}\n```", diff)).await?;
-                } else {
-                    bot.send_message(chat_id, "No recent diff available.").await?;
-                }
-                return Ok(());
+                // Removed - wasn't working, let Claude handle diff requests
             }
             Intent::ShowError => {
                 if let Some(ref error) = ui_ctx.last_error {
@@ -1054,7 +1066,7 @@ async fn handle_text(
     let conversation_context = get_conversation_context(data, chat_id.0);
 
     // Inject relevant memory context (semantic facts)
-    let memory_context = get_memory_context(data, &expanded_text);
+    let memory_context = get_memory_context_async(data, &expanded_text).await;
 
     // Build enhanced prompt with conversation history + memory facts
     let enhanced_prompt = if conversation_context.is_empty() && memory_context.is_empty() {
@@ -1161,54 +1173,49 @@ async fn handle_text(
             store_conversation_exchange(data, chat_id.0, text, &response.text);
 
             // Extract facts for continuous learning
-            extract_and_learn_facts(data, &response.text, user_id);
+            extract_and_learn_facts_async(data, &response.text, user_id).await;
 
-            // Phase 6: Detect if response contains file paths or diffs for context
-            let has_changes = response.text.contains("diff") ||
-                              response.text.contains("modified") ||
-                              response.text.contains("created") ||
-                              response.text.contains("Changed ");
-
-            // Extract file paths mentioned in response
+            // Extract file paths mentioned in response for context
             if let Some(file_path) = extract_file_path(&response.text) {
                 data.update_ui_context(chat_id.0, |ctx| ctx.set_file(&file_path)).await;
-            }
-
-            // Extract diff if present
-            if let Some(diff) = extract_diff(&response.text) {
-                data.update_ui_context(chat_id.0, |ctx| ctx.set_diff(&diff)).await;
             }
 
             // Send response
             send_long_message(bot, chat_id, &response.text).await?;
 
-            // Phase 6: Generate and show suggestions after task completion
-            let suggestions = suggest_next_actions(&expanded_text, true, has_changes);
-            if !suggestions.is_empty() {
-                if let Some(keyboard) = suggestions_keyboard(&suggestions) {
-                    bot.send_message(chat_id, "Suggestions:")
-                        .reply_markup(keyboard)
-                        .await?;
-                }
-            }
+            // Suggestions removed - user found buttons annoying
         }
         Err(e) => {
             // Store error in context for "fix it" support
             let error_msg = e.to_string();
             data.update_ui_context(chat_id.0, |ctx| ctx.set_error(&error_msg)).await;
 
-            // Send error with suggestion to fix
-            bot.send_message(chat_id, &error_msg).await?;
+            // CRITICAL: Store failed attempt in conversation history for context continuity
+            // This ensures the next Claude invocation knows what was attempted
+            let is_timeout = error_msg.contains("Timeout") || error_msg.contains("timeout");
+            let failure_context = if is_timeout {
+                format!(
+                    "[Task timed out after 5 minutes. Original request: {}]\n\n\
+                    Partial output before timeout:\n{}",
+                    text,
+                    error_msg.lines().skip(2).collect::<Vec<_>>().join("\n")
+                )
+            } else {
+                format!("[Task failed: {}]", error_msg.lines().next().unwrap_or("unknown error"))
+            };
+            store_conversation_exchange(data, chat_id.0, text, &failure_context);
 
-            // Show error-related suggestions
-            let suggestions = suggest_next_actions(&expanded_text, false, false);
-            if !suggestions.is_empty() {
-                if let Some(keyboard) = suggestions_keyboard(&suggestions) {
-                    bot.send_message(chat_id, "What would you like to do?")
-                        .reply_markup(keyboard)
-                        .await?;
-                }
+            // Also learn about the failure for future reference
+            if is_timeout {
+                let timeout_fact = format!(
+                    "Task '{}' timed out - may need to be broken into smaller steps",
+                    truncate(text, 50)
+                );
+                let _ = learn_fact_async(data, &timeout_fact, user_id).await;
             }
+
+            // Send error message
+            bot.send_message(chat_id, &error_msg).await?;
         }
     }
 
@@ -1333,28 +1340,6 @@ fn format_circle_result(result: &PipelineResult) -> String {
     }
 
     msg
-}
-
-/// Extract diff from response text
-fn extract_diff(text: &str) -> Option<String> {
-    // Look for diff blocks
-    if let Some(start) = text.find("```diff") {
-        if let Some(end) = text[start..].find("```\n") {
-            let diff = &text[start + 7..start + end];
-            return Some(diff.trim().to_string());
-        }
-    }
-    // Look for unified diff format
-    if text.contains("@@") && (text.contains("+") || text.contains("-")) {
-        let lines: Vec<&str> = text.lines()
-            .filter(|l| l.starts_with('+') || l.starts_with('-') || l.starts_with("@@"))
-            .take(20)
-            .collect();
-        if !lines.is_empty() {
-            return Some(lines.join("\n"));
-        }
-    }
-    None
 }
 
 fn check_user_limits(data: &BotData, user_id: i64) -> std::result::Result<(), String> {
@@ -1682,7 +1667,7 @@ async fn handle_command(
             if args.is_empty() {
                 bot.send_message(chat_id, "Usage: /learn <fact to remember>").await?;
             } else {
-                let result = learn_fact(data, args, user_id);
+                let result = learn_fact_async(data, args, user_id).await;
                 bot.send_message(chat_id, result).await?;
             }
         }
@@ -2329,12 +2314,23 @@ async fn backfill_memory_embeddings(data: &BotData) -> String {
     )
 }
 
-/// Format embedding statistics
+/// Format embedding statistics (sync part)
 fn format_embedding_stats(data: &BotData) -> Result<String> {
-    let store = data.memory_store.lock().unwrap();
-    let stats = store.embedding_stats()?;
+    let (stats, status, embedder) = {
+        let store = data.memory_store.lock().unwrap();
+        let stats = store.embedding_stats()?;
+        let status = if store.has_embeddings() { "✓ Available" } else { "✗ Unavailable" };
+        (stats, status, store.get_embedder())
+    };
 
-    let status = if store.has_embeddings() { "✓ Available" } else { "✗ Unavailable" };
+    // Get cache stats if embedder available
+    let cache_info = if let Some(ref emb) = embedder {
+        // Can't await here (sync fn), so we'll show placeholder
+        // The actual stats would need an async version
+        "\nCache: enabled (1000 entries, 1h TTL)".to_string()
+    } else {
+        String::new()
+    };
 
     Ok(format!(
         "Embedding Stats\n\n\
@@ -2342,13 +2338,16 @@ fn format_embedding_stats(data: &BotData) -> Result<String> {
         Total memories: {}\n\
         With embeddings: {}\n\
         Without embeddings: {}\n\
-        Coverage: {:.1}%\n\n\
+        Coverage: {:.1}%{}\n\n\
+        Search: RRF hybrid (BM25 + vector)\n\
+        Time decay: 30-day half-life\n\n\
         Use /memory backfill to generate missing embeddings.",
         status,
         stats.total_memories,
         stats.with_embeddings,
         stats.without_embeddings,
-        stats.coverage_percent
+        stats.coverage_percent,
+        cache_info
     ))
 }
 
@@ -2361,6 +2360,42 @@ fn learn_fact(data: &BotData, fact: &str, user_id: i64) -> String {
 
     match store.learn(fact, &category, &source, 0.9) {
         Ok(id) => format!("Learned [{}]: {}\n(ID: {})", category, truncate(fact, 50), &id[..8]),
+        Err(e) => format!("Failed to learn: {}", e),
+    }
+}
+
+/// Learn a fact with embedding (async version)
+async fn learn_fact_async(data: &BotData, fact: &str, user_id: i64) -> String {
+    // Get embedder outside the lock
+    let embedder = {
+        let store = data.memory_store.lock().unwrap();
+        store.get_embedder()
+    };
+
+    // Determine category from content
+    let category = categorize_fact(fact);
+    let source = format!("telegram_user_{}", user_id);
+
+    // Compute embedding outside the lock (async)
+    let embedding = if let Some(embedder) = embedder {
+        embedder.read().await.embed(fact).await.ok()
+    } else {
+        None
+    };
+
+    // Store the fact with embedding
+    let store = data.memory_store.lock().unwrap();
+    let result = store.learn(fact, &category, &source, 0.9);
+
+    match result {
+        Ok(id) => {
+            // Store embedding if we have one
+            if let Some(ref emb) = embedding {
+                let _ = store.store_embedding(&id, emb);
+            }
+            let with_emb = if embedding.is_some() { " (with embedding)" } else { "" };
+            format!("Learned [{}]: {}{}\n(ID: {})", category, truncate(fact, 50), with_emb, &id[..8])
+        }
         Err(e) => format!("Failed to learn: {}", e),
     }
 }
@@ -2542,9 +2577,94 @@ fn get_memory_context(data: &BotData, prompt: &str) -> String {
     context
 }
 
-/// Extract facts from Claude's response for learning
-fn extract_and_learn_facts(data: &BotData, response: &str, user_id: i64) {
-    // Look for explicit "I'll remember" or "Note:" patterns
+/// Get relevant memories as context for a prompt (async with HyDE + hybrid search + reranking)
+async fn get_memory_context_async(data: &BotData, prompt: &str) -> String {
+    // Get embedder outside the lock
+    let embedder = {
+        let store = data.memory_store.lock().unwrap();
+        store.get_embedder()
+    };
+
+    // HyDE: Generate hypothetical answer for better retrieval
+    // Only for question-like prompts (contains ? or starts with what/who/how/why/when/where)
+    let hyde_text = if prompt.contains('?') ||
+        prompt.to_lowercase().split_whitespace().next()
+            .map(|w| ["what", "who", "how", "why", "when", "where", "which", "is", "are", "do", "does", "can"].contains(&w))
+            .unwrap_or(false)
+    {
+        match data.llama_worker.generate_hyde(prompt).await {
+            Ok(hyde) => Some(hyde),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    // Use HyDE text for embedding if available, otherwise use original prompt
+    let text_to_embed = hyde_text.as_deref().unwrap_or(prompt);
+
+    // Compute embedding outside the lock (async)
+    let (query_embedding, has_reranker) = if let Some(ref embedder) = embedder {
+        let emb = embedder.read().await;
+        (emb.embed(text_to_embed).await.ok(), emb.has_reranker())
+    } else {
+        (None, false)
+    };
+
+    // Get initial results with hybrid search
+    let results = {
+        let store = data.memory_store.lock().unwrap();
+        // Fetch more candidates if we'll rerank
+        let fetch_limit = if has_reranker { 10 } else { 3 };
+        match store.search_hybrid_sync(prompt, query_embedding, fetch_limit, 0.4) {
+            Ok(r) => r,
+            Err(_) => return String::new(),
+        }
+    };
+
+    if results.is_empty() {
+        return String::new();
+    }
+
+    // Apply cross-encoder reranking if available
+    let final_results: Vec<crate::memory::ScoredMemory> = if has_reranker && results.len() > 1 {
+        if let Some(ref embedder) = embedder {
+            let docs: Vec<(String, String)> = results
+                .iter()
+                .map(|r| (r.entry.id.clone(), r.entry.content.clone()))
+                .collect();
+
+            match embedder.read().await.rerank(prompt, docs, 3).await {
+                Ok(reranked) => {
+                    // Map back to ScoredMemory
+                    let id_to_entry: std::collections::HashMap<String, crate::memory::ScoredMemory> = results
+                        .into_iter()
+                        .map(|r| (r.entry.id.clone(), r))
+                        .collect();
+
+                    reranked
+                        .into_iter()
+                        .filter_map(|(id, _score)| id_to_entry.get(&id).cloned())
+                        .collect()
+                }
+                Err(_) => results.into_iter().take(3).collect(),
+            }
+        } else {
+            results.into_iter().take(3).collect()
+        }
+    } else {
+        results.into_iter().take(3).collect()
+    };
+
+    let mut context = String::from("\n\n[Relevant memories from previous conversations:]\n");
+    for r in final_results {
+        context.push_str(&format!("- {}\n", r.entry.content));
+    }
+    context
+}
+
+/// Extract facts from Claude's response for learning (async with embeddings)
+async fn extract_and_learn_facts_async(data: &BotData, response: &str, user_id: i64) {
     let patterns = [
         "I'll remember",
         "I've noted",
@@ -2558,7 +2678,7 @@ fn extract_and_learn_facts(data: &BotData, response: &str, user_id: i64) {
             if line.contains(pattern) {
                 let fact = line.replace(pattern, "").trim().to_string();
                 if !fact.is_empty() && fact.len() > 10 {
-                    let _ = learn_fact(data, &fact, user_id);
+                    let _ = learn_fact_async(data, &fact, user_id).await;
                 }
             }
         }

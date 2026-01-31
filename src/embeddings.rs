@@ -4,11 +4,14 @@
 //! Falls back to keyword-based FTS5 search if Ollama is unavailable.
 //!
 //! Supports hybrid retrieval: combines FTS5 keyword scores with vector similarity.
+//! Includes LRU caching for query embeddings to reduce latency.
 
 use anyhow::{Context, Result};
+use moka::future::Cache;
 use serde::Deserialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::{info, warn};
 
 /// Embedding store configuration
 #[derive(Debug, Clone)]
@@ -21,17 +24,36 @@ pub struct EmbeddingConfig {
     pub dimension: usize,
     /// Request timeout
     pub timeout: Duration,
+    /// Reranker model (optional, for cross-encoder reranking)
+    pub reranker_model: Option<String>,
+}
+
+/// Get embedding dimension for known models
+fn model_dimension(model: &str) -> usize {
+    match model {
+        "mxbai-embed-large" => 1024,
+        "snowflake-arctic-embed" | "snowflake-arctic-embed-m" => 768,
+        "nomic-embed-text" => 768,
+        "all-minilm" | "all-minilm-l6-v2" => 384,
+        "bge-large" | "bge-large-en" => 1024,
+        "bge-base" | "bge-base-en" => 768,
+        _ => 768, // Default fallback
+    }
 }
 
 impl Default for EmbeddingConfig {
     fn default() -> Self {
+        let model = std::env::var("EMBEDDING_MODEL")
+            .unwrap_or_else(|_| "mxbai-embed-large".to_string()); // Upgraded default
+        let dimension = model_dimension(&model);
+
         Self {
             ollama_url: std::env::var("OLLAMA_URL")
                 .unwrap_or_else(|_| "http://localhost:11434".to_string()),
-            model: std::env::var("EMBEDDING_MODEL")
-                .unwrap_or_else(|_| "nomic-embed-text".to_string()),
-            dimension: 768, // nomic-embed-text default
+            model,
+            dimension,
             timeout: Duration::from_secs(30),
+            reranker_model: std::env::var("RERANKER_MODEL").ok(), // e.g., "bge-reranker-base"
         }
     }
 }
@@ -41,6 +63,11 @@ pub struct EmbeddingStore {
     config: EmbeddingConfig,
     client: reqwest::Client,
     available: std::sync::atomic::AtomicBool,
+    /// LRU cache for query embeddings (max 1000 entries, 1 hour TTL)
+    cache: Cache<String, Vec<f32>>,
+    /// Cache statistics
+    cache_hits: AtomicU64,
+    cache_misses: AtomicU64,
 }
 
 /// Ollama embedding response
@@ -57,16 +84,33 @@ impl EmbeddingStore {
             .build()
             .expect("Failed to create HTTP client");
 
+        // LRU cache: 1000 entries, 1 hour TTL
+        let cache = Cache::builder()
+            .max_capacity(1000)
+            .time_to_live(Duration::from_secs(3600))
+            .build();
+
         Self {
             config,
             client,
             available: std::sync::atomic::AtomicBool::new(true),
+            cache,
+            cache_hits: AtomicU64::new(0),
+            cache_misses: AtomicU64::new(0),
         }
     }
 
     /// Create with default configuration
     pub fn with_defaults() -> Self {
         Self::new(EmbeddingConfig::default())
+    }
+
+    /// Get cache statistics
+    pub fn cache_stats(&self) -> (u64, u64) {
+        (
+            self.cache_hits.load(Ordering::Relaxed),
+            self.cache_misses.load(Ordering::Relaxed),
+        )
     }
 
     /// Check if Ollama is available
@@ -94,8 +138,33 @@ impl EmbeddingStore {
         self.available.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Generate embedding for text
+    /// Generate embedding for text (with caching)
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        if !self.is_available() {
+            anyhow::bail!("Embedding service unavailable");
+        }
+
+        // Normalize text for cache key (trim, lowercase for queries)
+        let cache_key = text.trim().to_string();
+
+        // Check cache first
+        if let Some(cached) = self.cache.get(&cache_key).await {
+            self.cache_hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(cached);
+        }
+        self.cache_misses.fetch_add(1, Ordering::Relaxed);
+
+        // Not in cache, compute embedding
+        let embedding = self.embed_uncached(text).await?;
+
+        // Store in cache
+        self.cache.insert(cache_key, embedding.clone()).await;
+
+        Ok(embedding)
+    }
+
+    /// Generate embedding without caching (for storage, not queries)
+    pub async fn embed_uncached(&self, text: &str) -> Result<Vec<f32>> {
         if !self.is_available() {
             anyhow::bail!("Embedding service unavailable");
         }
@@ -157,6 +226,88 @@ impl EmbeddingStore {
         }
 
         dot / (norm_a * norm_b)
+    }
+
+    /// Check if reranker is configured
+    pub fn has_reranker(&self) -> bool {
+        self.config.reranker_model.is_some()
+    }
+
+    /// Rerank documents using cross-encoder model
+    ///
+    /// Takes a query and list of (id, content) pairs, returns reranked (id, score) pairs.
+    /// Uses LLM to score relevance of each document to the query.
+    pub async fn rerank(
+        &self,
+        query: &str,
+        documents: Vec<(String, String)>,
+        top_k: usize,
+    ) -> Result<Vec<(String, f64)>> {
+        let reranker = match &self.config.reranker_model {
+            Some(model) => model,
+            None => return Ok(documents.into_iter().map(|(id, _)| (id, 1.0)).collect()),
+        };
+
+        let url = format!("{}/api/generate", self.config.ollama_url);
+        let mut results: Vec<(String, f64)> = Vec::with_capacity(documents.len());
+
+        for (id, content) in documents {
+            // Truncate long documents for reranking
+            let doc_preview = if content.len() > 500 {
+                format!("{}...", &content[..500])
+            } else {
+                content
+            };
+
+            // Cross-encoder reranking prompt
+            let prompt = format!(
+                "Rate the relevance of this document to the query on a scale of 0.0 to 1.0.\n\n\
+                Query: {}\n\n\
+                Document: {}\n\n\
+                Return only a decimal number between 0.0 and 1.0:",
+                query, doc_preview
+            );
+
+            match self.client
+                .post(&url)
+                .json(&serde_json::json!({
+                    "model": reranker,
+                    "prompt": prompt,
+                    "stream": false,
+                    "options": {
+                        "temperature": 0.0,
+                        "num_predict": 10
+                    }
+                }))
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(json) = resp.json::<serde_json::Value>().await {
+                        if let Some(response) = json.get("response").and_then(|r| r.as_str()) {
+                            // Parse score from response
+                            let score = response
+                                .trim()
+                                .parse::<f64>()
+                                .unwrap_or(0.5)
+                                .clamp(0.0, 1.0);
+                            results.push((id, score));
+                            continue;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            // Fallback: keep original with neutral score
+            results.push((id, 0.5));
+        }
+
+        // Sort by score descending and take top_k
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(top_k);
+
+        Ok(results)
     }
 
     /// Find most similar vectors from a collection

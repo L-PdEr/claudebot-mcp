@@ -156,6 +156,48 @@ impl LlamaWorker {
         Ok(result.response.trim().to_string())
     }
 
+    /// HyDE: Generate hypothetical document for better retrieval
+    ///
+    /// Instead of embedding the raw query, generate a hypothetical answer
+    /// and embed that. The hypothetical answer is more similar to actual
+    /// stored documents than the question itself.
+    pub async fn generate_hyde(&self, query: &str) -> Result<String> {
+        let prompt = format!(
+            "Answer this question concisely in 1-2 sentences as if you knew the answer. \
+            Do not say 'I don't know'. Just provide a plausible answer.\n\n\
+            Question: {}\n\nAnswer:",
+            query
+        );
+
+        let url = format!("{}/api/generate", self.config.ollama_url);
+
+        let response = self.client
+            .post(&url)
+            .json(&serde_json::json!({
+                "model": self.config.model,
+                "prompt": prompt,
+                "stream": false,
+                "options": {
+                    "temperature": 0.3,
+                    "num_predict": 150,
+                }
+            }))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .context("HyDE generation failed")?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("HyDE request failed: {}", response.status());
+        }
+
+        let result: OllamaGenerateResponse = response.json().await
+            .context("Failed to parse HyDE response")?;
+
+        debug!("HyDE: '{}' -> '{}'", query, result.response.trim());
+        Ok(result.response.trim().to_string())
+    }
+
     /// Generate embedding vector
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let url = format!("{}/api/embeddings", self.config.ollama_url);
