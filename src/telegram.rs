@@ -991,9 +991,28 @@ struct ClaudeResponse {
 /// Strategy: NO hard timeout - only silence detection.
 /// Work continues as long as Claude produces output.
 /// Only kills process if no output for SILENCE_TIMEOUT_SECS.
-const SILENCE_WARNING_SECS: u64 = 60;      // Warn after 1 min silence
-const SILENCE_TIMEOUT_SECS: u64 = 180;     // Kill after 3 min silence (no activity)
+///
+/// Environment variables:
+/// - CLAUDE_SILENCE_TIMEOUT_SECS: Kill after N seconds of no output (default: 600)
+/// - CLAUDE_SILENCE_WARNING_SECS: Warn after N seconds of no output (default: 120)
+///
+/// For long planning/coding tasks, increase CLAUDE_SILENCE_TIMEOUT_SECS to 1800+ (30 min)
+fn get_silence_timeout_secs() -> u64 {
+    std::env::var("CLAUDE_SILENCE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(600) // Default: 10 minutes (was 3 min - too short for complex tasks)
+}
+
+fn get_silence_warning_secs() -> u64 {
+    std::env::var("CLAUDE_SILENCE_WARNING_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(120) // Default: 2 minutes
+}
+
 const STATUS_UPDATE_INTERVAL_SECS: u64 = 60; // Send status update every minute
+const THINKING_UPDATE_INTERVAL_SECS: u64 = 90; // Send "thinking" indicator every 90 sec
 
 /// Invoke Claude Code CLI with JSON output for usage tracking
 /// Includes silence detection and total timeout handling
@@ -1062,6 +1081,17 @@ async fn invoke_claude_cli(prompt: &str, working_dir: &PathBuf, autonomous: bool
     let mut stderr_reader = stderr.map(|s| BufReader::new(s).lines());
 
     let mut last_status_update = Instant::now();
+    let mut last_thinking_update = Instant::now();
+
+    // Get configurable timeout values
+    let silence_timeout_secs = get_silence_timeout_secs();
+    let silence_warning_secs = get_silence_warning_secs();
+
+    tracing::info!(
+        "Claude CLI timeout config: warning={}s, timeout={}s",
+        silence_warning_secs,
+        silence_timeout_secs
+    );
 
     // Monitor output - NO hard timeout, only silence detection
     // Work continues as long as Claude produces output
@@ -1070,7 +1100,7 @@ async fn invoke_claude_cli(prompt: &str, working_dir: &PathBuf, autonomous: bool
         let silence_duration = last_output_time.elapsed();
 
         // Check silence timeout (only way to timeout - no hard limit)
-        if silence_duration.as_secs() >= SILENCE_TIMEOUT_SECS {
+        if silence_duration.as_secs() >= silence_timeout_secs {
             tracing::warn!(
                 "Claude CLI silence timeout after {} seconds of no output (total runtime: {:?})",
                 silence_duration.as_secs(),
@@ -1090,20 +1120,33 @@ async fn invoke_claude_cli(prompt: &str, working_dir: &PathBuf, autonomous: bool
 
             return Err(anyhow::anyhow!(
                 "Process stopped responding (no output for {} seconds, total runtime: {:?}).{}",
-                SILENCE_TIMEOUT_SECS,
+                silence_timeout_secs,
                 total_duration,
                 partial_info
             ));
         }
 
         // Silence warning (but don't stop - just log)
-        if silence_duration.as_secs() >= SILENCE_WARNING_SECS && !silence_warned {
+        if silence_duration.as_secs() >= silence_warning_secs && !silence_warned {
             tracing::warn!(
                 "Claude CLI silent for {} seconds (will timeout at {} seconds)",
                 silence_duration.as_secs(),
-                SILENCE_TIMEOUT_SECS
+                silence_timeout_secs
             );
             silence_warned = true;
+        }
+
+        // Log thinking indicator for very long silences (helps with debugging)
+        if silence_duration.as_secs() >= THINKING_UPDATE_INTERVAL_SECS
+            && last_thinking_update.elapsed().as_secs() >= THINKING_UPDATE_INTERVAL_SECS
+        {
+            tracing::info!(
+                "Claude still thinking... (silent for {}s, timeout at {}s, total runtime: {:?})",
+                silence_duration.as_secs(),
+                silence_timeout_secs,
+                elapsed
+            );
+            last_thinking_update = Instant::now();
         }
 
         // Log periodic status for long-running tasks
