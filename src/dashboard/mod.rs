@@ -28,3 +28,7 @@ pub mod api;
 
 pub use config::DashboardConfig;
 pub use server::DashboardServer;
+pub use api::{
+    api_router, health_router, ApiStatus, BotStatus, DashboardApiState, ErrorResponse,
+    MetricsResponse, StatusResponse, StatusState,
+};

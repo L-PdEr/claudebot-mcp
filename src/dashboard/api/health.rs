@@ -60,7 +60,7 @@ pub struct HealthResponse {
 ///
 /// Returns 200 OK with health information.
 /// Used by load balancers and monitoring systems.
-async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
+pub async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         version: state.version,
@@ -73,7 +73,7 @@ async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResponse
 ///
 /// Returns 200 OK if the server is alive.
 /// Kubernetes-style liveness check.
-async fn liveness() -> StatusCode {
+pub async fn liveness() -> StatusCode {
     StatusCode::OK
 }
 
@@ -81,7 +81,7 @@ async fn liveness() -> StatusCode {
 ///
 /// Returns 200 OK if the server is ready to accept traffic.
 /// Can be extended to check database connections, etc.
-async fn readiness() -> StatusCode {
+pub async fn readiness() -> StatusCode {
     // Future: Check database connections, external services
     StatusCode::OK
 }
