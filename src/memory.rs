@@ -565,26 +565,13 @@ impl MemoryStore {
     }
 
     /// Search by embedding similarity only
-    /// Search by embedding using HNSW index (O(log n))
-    /// Falls back to brute force if HNSW is empty
+    /// Uses brute force O(n) search - HNSW disabled due to upstream bug
+    /// TODO: Re-enable HNSW once hnsw crate fixes copy_from_slice panic
     fn search_by_embedding(&self, query_vec: &[f32], limit: usize) -> Result<Vec<(String, f64)>> {
-        // Try HNSW first (O(log n))
-        let hnsw_results = {
-            let index = self.hnsw_index.lock().unwrap();
-            if index.len() > 0 {
-                Some(index.search(query_vec, limit))
-            } else {
-                None
-            }
-        };
-
-        if let Some(results) = hnsw_results {
-            debug!("HNSW search returned {} results", results.len());
-            return Ok(results);
-        }
-
-        // Fallback: brute force O(n) - only when HNSW is empty
-        debug!("HNSW empty, falling back to brute force search");
+        // HNSW disabled - causes panic in hnsw-0.11.0:
+        // "copy_from_slice: source slice length (X) does not match destination slice length (Y)"
+        // Using brute force instead (acceptable for < 10k memories)
+        debug!("Using brute force search (HNSW disabled)");
         let mut stmt = self.conn.prepare(
             r#"
             SELECT id, embedding
