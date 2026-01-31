@@ -44,7 +44,7 @@ fn model_dimension(model: &str) -> usize {
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         let model = std::env::var("EMBEDDING_MODEL")
-            .unwrap_or_else(|_| "mxbai-embed-large".to_string()); // Upgraded default
+            .unwrap_or_else(|_| "nomic-embed-text".to_string()); // Must match llama_worker.rs (768 dim)
         let dimension = model_dimension(&model);
 
         Self {
