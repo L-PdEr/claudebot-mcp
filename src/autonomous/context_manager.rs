@@ -9,7 +9,7 @@
 //! Industry standard: Retrieval-Augmented Generation (RAG) with multi-source fusion
 
 use std::collections::HashSet;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::conversation::ConversationStore;
 use crate::graph::GraphStore;
@@ -220,26 +220,41 @@ impl ContextManager {
         context
     }
 
+    /// Baseline identity context - always included when no dynamic identity is found
+    const BASELINE_IDENTITY: &'static str =
+        "I am ClaudeBot, an AI assistant powered by Claude, running as a Telegram bot with persistent memory. \
+        I can remember facts from our conversations, learn from interactions, and recall relevant context. \
+        I have access to the Claude CLI for coding tasks and can execute commands autonomously.";
+
     /// Get identity context for user
     fn get_identity_context(&self, _user_id: i64, memory: &std::sync::Mutex<MemoryStore>) -> Option<String> {
-        let store = memory.lock().ok()?;
+        let store = match memory.lock() {
+            Ok(s) => s,
+            Err(_) => return Some(Self::BASELINE_IDENTITY.to_string()),
+        };
 
-        // Search for identity-related memories
-        let results = store.search("identity user name", 5).ok()?;
-
-        if results.is_empty() {
-            return None;
-        }
-
-        // Look for explicit identity facts
-        for result in &results {
-            let content = result.entry.content.to_lowercase();
-            if content.contains("i am ") || content.contains("my name is") || content.contains("identify as") {
-                return Some(result.entry.content.clone());
+        // First, try to find explicit identity memories by category
+        if let Ok(results) = store.get_by_category("identity", 3) {
+            for result in &results {
+                let content = result.content.to_lowercase();
+                if content.contains("i am ") || content.contains("my name is") {
+                    return Some(result.content.clone());
+                }
             }
         }
 
-        None
+        // Fallback: search by keywords
+        if let Ok(results) = store.search("identity user name role", 5) {
+            for result in &results {
+                let content = result.entry.content.to_lowercase();
+                if content.contains("i am ") || content.contains("my name is") || content.contains("identify as") {
+                    return Some(result.entry.content.clone());
+                }
+            }
+        }
+
+        // Always return at least baseline identity
+        Some(Self::BASELINE_IDENTITY.to_string())
     }
 
     /// Retrieve relevant memories using hybrid search with optional HyDE
@@ -275,15 +290,35 @@ impl ContextManager {
         // Perform hybrid search
         let store = match memory.lock() {
             Ok(s) => s,
-            Err(_) => return vec![],
+            Err(e) => {
+                warn!("Failed to lock memory store: {}", e);
+                return vec![];
+            }
         };
 
         match store.search_hybrid_sync(prompt, query_embedding, self.config.max_memories, 0.4) {
-            Ok(results) => results
-                .into_iter()
-                .filter(|r| r.score >= self.config.min_relevance)
-                .collect(),
-            Err(_) => vec![],
+            Ok(results) => {
+                debug!(
+                    "Memory search returned {} results (min_relevance: {})",
+                    results.len(),
+                    self.config.min_relevance
+                );
+                if !results.is_empty() {
+                    debug!(
+                        "Top result: score={:.3}, content='{}'",
+                        results[0].score,
+                        &results[0].entry.content[..results[0].entry.content.len().min(50)]
+                    );
+                }
+                results
+                    .into_iter()
+                    .filter(|r| r.score >= self.config.min_relevance)
+                    .collect()
+            }
+            Err(e) => {
+                warn!("Memory hybrid search failed: {}", e);
+                vec![]
+            }
         }
     }
 

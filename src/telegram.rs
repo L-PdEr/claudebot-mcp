@@ -1580,13 +1580,17 @@ async fn handle_text(
             // Store conversation exchange (user message + assistant response)
             store_conversation_exchange(data, chat_id.0, text, &response.text);
 
-            // Extract facts for continuous learning
-            extract_and_learn_facts_async(data, &response.text, user_id).await;
-
             // Extract file paths mentioned in response for context
             if let Some(file_path) = extract_file_path(&response.text) {
                 data.update_ui_context(chat_id.0, |ctx| ctx.set_file(&file_path)).await;
             }
+
+            // Send response FIRST - don't block on slow background tasks
+            send_long_message(bot, chat_id, &response.text).await?;
+
+            // Extract facts for continuous learning (AFTER sending response)
+            // This can be slow due to Ollama calls, so we do it after the user sees the response
+            extract_and_learn_facts_async(data, &response.text, user_id).await;
 
             // Phase 8: Reflection-based quality evaluation (non-blocking background task)
             // Only evaluate substantive responses, not simple commands
@@ -1614,9 +1618,6 @@ async fn handle_text(
                     }
                 });
             }
-
-            // Send response
-            send_long_message(bot, chat_id, &response.text).await?;
         }
         Err(e) => {
             // Store error in context for "fix it" support
