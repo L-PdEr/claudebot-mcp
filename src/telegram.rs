@@ -31,7 +31,7 @@ use tokio::process::Command;
 use tokio::sync::RwLock;
 
 use crate::autonomous::{
-    AutonomousLearner, ContextManager, GoalTracker, FeedbackLoop,
+    AutonomousLearner, BackgroundProcessor, ContextManager, GoalTracker, FeedbackLoop,
 };
 use crate::bridge::GrpcBridgeClient;
 use crate::conversation::ConversationStore;
@@ -230,8 +230,9 @@ pub async fn run_telegram_bot() -> Result<()> {
         context_manager: ContextManager::new(),
         goal_tracker: GoalTracker::new(),
         feedback_loop: FeedbackLoop::new(),
+        background_processor: BackgroundProcessor::new(),
     });
-    tracing::info!("Autonomous behavior system initialized");
+    tracing::info!("Autonomous behavior system initialized (goals, learning, feedback, background)");
 
     // Auto-load system context on startup
     let context_result = load_context(&handler_data);
@@ -241,10 +242,35 @@ pub async fn run_telegram_bot() -> Result<()> {
         tracing::warn!("Context auto-load: {}", context_result);
     }
 
-    // Start lifecycle manager in background
+    // Start lifecycle manager in background with autonomous callbacks
     let lifecycle_clone = Arc::clone(&lifecycle);
+    let handler_data_clone = Arc::clone(&handler_data);
     tokio::spawn(async move {
-        lifecycle_clone.run(LifecycleCallbacks::default()).await;
+        // Set up callbacks for background processing during idle
+        let data = handler_data_clone;
+        let callbacks = LifecycleCallbacks {
+            on_consolidate: Some(Box::new({
+                let data = Arc::clone(&data);
+                move || {
+                    let data = Arc::clone(&data);
+                    Box::pin(async move {
+                        // Run background processor tasks during idle
+                        let results = data.background_processor
+                            .run_once(&data.memory_store, &data.llama_worker)
+                            .await?;
+                        for (task, count) in results {
+                            if count > 0 {
+                                tracing::debug!("Background {}: {} items", task.as_str(), count);
+                            }
+                        }
+                        Ok(())
+                    })
+                }
+            })),
+            on_decay: None,
+            on_compress: None,
+        };
+        lifecycle_clone.run(callbacks).await;
     });
 
     // Build explicit handler tree with callback query support
@@ -589,6 +615,7 @@ struct BotData {
     context_manager: ContextManager,
     goal_tracker: GoalTracker,
     feedback_loop: FeedbackLoop,
+    background_processor: BackgroundProcessor,
 }
 
 /// Pending permission request waiting for user approval
