@@ -1629,12 +1629,67 @@ async fn handle_text(
             let failure_context = format!("[Task failed: {}]", error_msg.lines().next().unwrap_or("unknown error"));
             store_conversation_exchange(data, chat_id.0, text, &failure_context);
 
-            // Send error message
-            bot.send_message(chat_id, &error_msg).await?;
+            // Send friendly error message with hints
+            let friendly_msg = format_friendly_error(&error_msg);
+            bot.send_message(chat_id, &friendly_msg).await?;
         }
     }
 
     Ok(())
+}
+
+/// Format error messages with friendly hints for common issues
+fn format_friendly_error(error: &str) -> String {
+    let error_lower = error.to_lowercase();
+
+    // Detect error type and provide helpful hints
+    let (icon, hint) = if error_lower.contains("permission denied") || error_lower.contains("eacces") {
+        ("🔒", Some("Run on server: `chown -R eliot:eliot /tmp/claude`"))
+    } else if error_lower.contains("no such file") || error_lower.contains("enoent") {
+        ("📁", Some("File or directory not found. Check the path exists."))
+    } else if error_lower.contains("connection refused") || error_lower.contains("econnrefused") {
+        ("🔌", Some("Service not running. Check if required services are up."))
+    } else if error_lower.contains("timeout") || error_lower.contains("timed out") {
+        ("⏱️", Some("Request timed out. Try again or break into smaller tasks."))
+    } else if error_lower.contains("out of memory") || error_lower.contains("enomem") {
+        ("💾", Some("Out of memory. Try a smaller task or restart the service."))
+    } else if error_lower.contains("rate limit") || error_lower.contains("too many requests") {
+        ("🚦", Some("Rate limited. Wait a moment and try again."))
+    } else if error_lower.contains("api key") || error_lower.contains("unauthorized") || error_lower.contains("authentication") {
+        ("🔑", Some("Authentication issue. Check API keys are configured."))
+    } else if error_lower.contains("disk full") || error_lower.contains("no space") {
+        ("💿", Some("Disk full. Free up space on the server."))
+    } else if error_lower.contains("spawn") || error_lower.contains("failed to spawn") {
+        ("⚙️", Some("Failed to start Claude CLI. Check it's installed: `claude --version`"))
+    } else {
+        ("❌", None)
+    };
+
+    // Extract first meaningful line of error
+    let first_line = error
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("Unknown error");
+
+    // Build friendly message
+    let mut msg = format!("{} Error: {}", icon, first_line);
+
+    if let Some(hint_text) = hint {
+        msg.push_str(&format!("\n\n💡 Hint: {}", hint_text));
+    }
+
+    // Add full error if it has more details (truncated)
+    let full_error = error.trim();
+    if full_error.len() > first_line.len() + 10 {
+        let details: String = full_error.chars().take(500).collect();
+        if details.len() < full_error.len() {
+            msg.push_str(&format!("\n\n📋 Details:\n{}...", details));
+        } else {
+            msg.push_str(&format!("\n\n📋 Details:\n{}", details));
+        }
+    }
+
+    msg
 }
 
 /// Extract file path from response text
