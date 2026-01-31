@@ -94,8 +94,10 @@ impl MessageEvent {
     /// Create a new message event
     pub fn new(id: impl Into<String>, user: impl Into<String>, content: impl Into<String>) -> Self {
         let content = content.into();
-        let truncated = if content.len() > 100 {
-            format!("{}...", &content[..97])
+        let truncated = if content.chars().count() > 100 {
+            // Safe UTF-8 truncation
+            let truncated: String = content.chars().take(97).collect();
+            format!("{}...", truncated)
         } else {
             content
         };
