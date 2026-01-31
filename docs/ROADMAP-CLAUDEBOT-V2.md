@@ -8,10 +8,15 @@
 
 ## 📋 Executive Summary
 
-**Current State:** Bot startet, empfängt aber keine Telegram-Nachrichten
+**Current State:** ✅ Bot läuft auf Hetzner mit HNSW-Fix und Startup-Notifications
 **Target State:** Voll funktionaler Bot mit allen Industry-Best-Practices
 
 **Timeline:** 4 Epics, 12 Tasks, ~2-3 Tage
+
+### Recent Changes (2026-01-31)
+- ✅ **HNSW Dimension Validation** - Prevents crashes from mismatched embedding dimensions
+- ✅ **Startup Notifications** - Telegram message on bot restart (crash detection)
+- ✅ **Deploy Script** - Auto-configures Ollama/embedding model settings
 
 ---
 
@@ -26,7 +31,7 @@
 id: T1.1
 type: bug-fix
 priority: critical
-status: pending
+status: ✅ COMPLETE
 circle: no  # Debug only, no new code
 
 acceptance_criteria:
@@ -49,7 +54,7 @@ investigation_steps:
 id: T1.2
 type: bug-fix
 priority: critical
-status: pending
+status: ✅ COMPLETE
 circle: yes  # Code changes require CIRCLE
 
 acceptance_criteria:
@@ -67,7 +72,7 @@ dependencies:
 id: T1.3
 type: test
 priority: high
-status: pending
+status: ✅ COMPLETE (manual verification)
 circle: yes
 
 acceptance_criteria:
@@ -93,7 +98,7 @@ deliverables:
 id: T2.1
 type: feature
 priority: high
-status: pending
+status: ✅ COMPLETE
 circle: yes
 
 description: |
@@ -122,12 +127,13 @@ files_to_modify:
 id: T2.2
 type: feature
 priority: medium
-status: pending
+status: ✅ COMPLETE (+ dimension validation fix 2026-01-31)
 circle: yes
 
 description: |
-  Add semantic search via local embeddings (Ollama nomic-embed-text).
+  Add semantic search via local embeddings (Ollama mxbai-embed-large, 1024-dim).
   Hybrid retrieval: FTS5 keyword + vector similarity.
+  Fixed: HNSW dimension validation to prevent panic on mismatched embeddings.
 
 acceptance_criteria:
   - [ ] src/embeddings.rs generates embeddings via Ollama
@@ -149,7 +155,7 @@ files_to_modify:
 id: T2.3
 type: feature
 priority: high
-status: pending
+status: ✅ COMPLETE
 circle: yes
 
 description: |
@@ -172,7 +178,7 @@ files_to_modify:
 id: T2.4
 type: feature
 priority: high
-status: pending
+status: ✅ COMPLETE
 circle: yes
 
 description: |
@@ -202,15 +208,16 @@ files_to_modify:
 id: T3.1
 type: improvement
 priority: high
-status: pending
+status: ✅ COMPLETE
 circle: yes
 
 acceptance_criteria:
-  - [ ] All errors logged with context
-  - [ ] User receives friendly error messages
-  - [ ] Bot auto-restarts on crash (systemd)
-  - [ ] Rate limiting on Telegram side
-  - [ ] Graceful shutdown on SIGTERM
+  - [x] All errors logged with context
+  - [x] User receives friendly error messages
+  - [x] Bot auto-restarts on crash (systemd)
+  - [x] Startup notification to Telegram on restart (2026-01-31)
+  - [x] Rate limiting on Telegram side
+  - [x] Graceful shutdown on SIGTERM
 
 files_to_modify:
   - src/telegram.rs
@@ -222,7 +229,7 @@ files_to_modify:
 id: T3.2
 type: feature
 priority: medium
-status: pending
+status: ✅ COMPLETE
 circle: yes
 
 acceptance_criteria:
@@ -241,7 +248,7 @@ files_to_modify:
 id: T3.3
 type: security
 priority: critical
-status: pending
+status: ✅ COMPLETE
 circle: yes
 
 acceptance_criteria:
@@ -268,7 +275,7 @@ files_to_modify:
 id: T4.1
 type: test
 priority: critical
-status: pending
+status: ✅ COMPLETE
 circle: no
 
 acceptance_criteria:
@@ -287,7 +294,7 @@ test_script: tests/e2e_telegram.sh
 id: T4.2
 type: deployment
 priority: critical
-status: pending
+status: ✅ COMPLETE (auto-deploys via deploy/deploy.sh)
 circle: no
 
 acceptance_criteria:
@@ -306,7 +313,7 @@ commands:
 id: T4.3
 type: validation
 priority: critical
-status: pending
+status: ✅ COMPLETE
 circle: no
 
 acceptance_criteria:
@@ -407,16 +414,18 @@ Pipeline:
 
 **Bot ist production-ready wenn:**
 
-1. ✅ Telegram messages werden empfangen und verarbeitet
-2. ✅ Claude CLI wird korrekt aufgerufen
-3. ✅ Token/Budget tracking funktioniert
-4. ✅ Memory system speichert und retrieved
-5. ✅ Graph memory extrahiert Entities
-6. ✅ Wake/Sleep cycle läuft im Hintergrund
-7. ✅ Vector search verbessert retrieval
-8. ✅ Alle errors werden geloggt und behandelt
-9. ✅ Security checks bestanden
-10. ✅ E2E tests pass lokal und remote
+1. ✅ Telegram messages werden empfangen und verarbeitet - **DONE**
+2. ✅ Claude CLI wird korrekt aufgerufen - **DONE**
+3. ✅ Token/Budget tracking funktioniert - **DONE**
+4. ✅ Memory system speichert und retrieved - **DONE**
+5. ✅ Graph memory extrahiert Entities - **DONE**
+6. ✅ Wake/Sleep cycle läuft im Hintergrund - **DONE**
+7. ✅ Vector search verbessert retrieval - **DONE** (mxbai-embed-large, 1024-dim)
+8. ✅ Alle errors werden geloggt und behandelt - **DONE**
+9. ✅ Security checks bestanden - **DONE**
+10. ✅ E2E tests pass lokal und remote - **DONE**
+11. ✅ HNSW dimension validation prevents crashes - **DONE** (2026-01-31)
+12. ✅ Startup notifications for crash detection - **DONE** (2026-01-31)
 
 ---
 
@@ -430,5 +439,5 @@ Pipeline:
 ---
 
 *Created: 2026-01-28*
-*Last Updated: 2026-01-28*
-*Status: Ready for Execution*
+*Last Updated: 2026-01-31*
+*Status: ✅ ALL TASKS COMPLETE - Bot Running on Hetzner*
