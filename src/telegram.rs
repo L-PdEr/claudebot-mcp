@@ -401,6 +401,30 @@ pub async fn run_telegram_bot() -> Result<()> {
     tracing::info!("  Bot is now LIVE - send a message!");
     tracing::info!("===========================================");
 
+    // Send startup notification to allowed users (crash/restart feedback)
+    let startup_users = handler_data.allowed_users.clone();
+    if !startup_users.is_empty() {
+        let startup_bot = Bot::new(token.clone());
+        let startup_msg = format!(
+            "🤖 *Bot Started*\n\n\
+            ClaudeBot is now online\\.\n\
+            _If you see this unexpectedly, the bot may have crashed and restarted\\._\n\n\
+            ⏰ {}",
+            chrono::Utc::now().format("%Y\\-%m\\-%d %H:%M:%S UTC")
+        );
+        for user_id in &startup_users {
+            if let Err(e) = startup_bot
+                .send_message(ChatId(*user_id), &startup_msg)
+                .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+                .await
+            {
+                tracing::warn!("Failed to send startup notification to {}: {}", user_id, e);
+            } else {
+                tracing::info!("Sent startup notification to user {}", user_id);
+            }
+        }
+    }
+
     // Create dispatcher with explicit configuration
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![handler_data])
