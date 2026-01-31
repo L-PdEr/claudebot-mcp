@@ -1,0 +1,523 @@
+// ============================================
+// ClaudeBot Dashboard - Main Stylesheet
+// ============================================
+
+@use 'variables' as *;
+@use 'mixins' as *;
+
+// ===== CSS Custom Properties (Theme) =====
+
+:root {
+  // Default to dark theme
+  @each $key, $value in $dark {
+    --#{$key}: #{$value};
+  }
+
+  // Font families
+  --font-sans: #{$font-sans};
+  --font-mono: #{$font-mono};
+}
+
+// Light theme
+@media (prefers-color-scheme: light) {
+  :root {
+    @each $key, $value in $light {
+      --#{$key}: #{$value};
+    }
+  }
+}
+
+// Manual theme toggle
+[data-theme="light"] {
+  @each $key, $value in $light {
+    --#{$key}: #{$value};
+  }
+}
+
+[data-theme="dark"] {
+  @each $key, $value in $dark {
+    --#{$key}: #{$value};
+  }
+}
+
+// ===== CSS Reset =====
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: $font-size-base;
+  line-height: $line-height-normal;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+// ===== Base Elements =====
+
+a {
+  color: $primary;
+  text-decoration: none;
+  transition: color $transition-fast;
+
+  &:hover {
+    color: $primary-light;
+  }
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+input,
+textarea,
+select {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+img,
+svg {
+  display: block;
+  max-width: 100%;
+}
+
+code,
+pre {
+  font-family: var(--font-mono);
+}
+
+// ===== Typography Classes =====
+
+.text-xs { font-size: $font-size-xs; }
+.text-sm { font-size: $font-size-sm; }
+.text-base { font-size: $font-size-base; }
+.text-lg { font-size: $font-size-lg; }
+.text-xl { font-size: $font-size-xl; }
+.text-2xl { font-size: $font-size-2xl; }
+.text-3xl { font-size: $font-size-3xl; }
+.text-4xl { font-size: $font-size-4xl; }
+
+.font-normal { font-weight: $font-weight-normal; }
+.font-medium { font-weight: $font-weight-medium; }
+.font-semibold { font-weight: $font-weight-semibold; }
+.font-bold { font-weight: $font-weight-bold; }
+
+.text-primary { color: var(--text-primary); }
+.text-secondary { color: var(--text-secondary); }
+.text-muted { color: var(--text-muted); }
+
+.text-success { color: $success; }
+.text-warning { color: $warning; }
+.text-error { color: $error; }
+.text-info { color: $info; }
+
+.text-gradient {
+  @include text-gradient;
+}
+
+// ===== Layout =====
+
+.container {
+  width: 100%;
+  max-width: $container-max;
+  margin: 0 auto;
+  padding: 0 $container-padding;
+
+  @include lg {
+    padding: 0 $spacing-8;
+  }
+}
+
+.page {
+  min-height: 100vh;
+  padding-bottom: $spacing-16;
+}
+
+// ===== Grid System =====
+
+.grid {
+  display: grid;
+  gap: $spacing-4;
+
+  @include md {
+    gap: $spacing-6;
+  }
+}
+
+.grid-cols-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+.grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.grid-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+@include sm {
+  .sm\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sm\:grid-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@include md {
+  .md\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .md\:grid-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .md\:grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+
+@include lg {
+  .lg\:grid-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .lg\:grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+
+// ===== Flexbox Utilities =====
+
+.flex { display: flex; }
+.flex-col { flex-direction: column; }
+.flex-wrap { flex-wrap: wrap; }
+.items-center { align-items: center; }
+.items-start { align-items: flex-start; }
+.items-end { align-items: flex-end; }
+.justify-center { justify-content: center; }
+.justify-between { justify-content: space-between; }
+.justify-end { justify-content: flex-end; }
+.gap-1 { gap: $spacing-1; }
+.gap-2 { gap: $spacing-2; }
+.gap-3 { gap: $spacing-3; }
+.gap-4 { gap: $spacing-4; }
+.gap-6 { gap: $spacing-6; }
+.gap-8 { gap: $spacing-8; }
+
+// ===== Spacing Utilities =====
+
+.mt-0 { margin-top: 0; }
+.mt-2 { margin-top: $spacing-2; }
+.mt-4 { margin-top: $spacing-4; }
+.mt-6 { margin-top: $spacing-6; }
+.mt-8 { margin-top: $spacing-8; }
+
+.mb-0 { margin-bottom: 0; }
+.mb-2 { margin-bottom: $spacing-2; }
+.mb-4 { margin-bottom: $spacing-4; }
+.mb-6 { margin-bottom: $spacing-6; }
+
+.p-0 { padding: 0; }
+.p-2 { padding: $spacing-2; }
+.p-4 { padding: $spacing-4; }
+.p-6 { padding: $spacing-6; }
+
+// ===== Card Component =====
+
+.card {
+  @include card-base;
+  @include fade-in;
+
+  &--hover {
+    @include card-hover;
+  }
+
+  &--glow {
+    @include card-glow;
+  }
+
+  &__header {
+    @include flex-between;
+    margin-bottom: $spacing-4;
+  }
+
+  &__title {
+    font-size: $font-size-sm;
+    font-weight: $font-weight-semibold;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  &__icon {
+    font-size: $font-size-xl;
+  }
+
+  &__body {
+    flex: 1;
+  }
+
+  &__footer {
+    margin-top: $spacing-4;
+    padding-top: $spacing-4;
+    border-top: 1px solid var(--border);
+  }
+}
+
+// ===== Button Component =====
+
+.btn {
+  @include btn-base;
+
+  &--primary {
+    @include btn-primary;
+  }
+
+  &--secondary {
+    @include btn-secondary;
+  }
+
+  &--ghost {
+    @include btn-ghost;
+  }
+
+  &--sm {
+    height: $btn-height-sm;
+    padding: 0 $spacing-3;
+    font-size: $font-size-xs;
+  }
+
+  &--lg {
+    height: $btn-height-lg;
+    padding: 0 $spacing-6;
+    font-size: $font-size-base;
+  }
+
+  &--danger {
+    @include btn-base;
+    background: $error;
+    color: white;
+
+    &:hover:not(:disabled) {
+      background: $error-light;
+    }
+  }
+
+  &--success {
+    @include btn-base;
+    background: $success;
+    color: white;
+
+    &:hover:not(:disabled) {
+      background: $success-light;
+    }
+  }
+}
+
+.btn-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: $spacing-2;
+}
+
+// ===== Status Badge =====
+
+.status-badge {
+  @include flex-center;
+  gap: $spacing-2;
+  padding: $spacing-1 $spacing-3;
+  background: var(--bg-tertiary);
+  border-radius: $radius-full;
+  font-size: $font-size-xs;
+  font-weight: $font-weight-medium;
+
+  &__dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    @include pulse-animation;
+
+    &--online {
+      background: $success;
+      box-shadow: 0 0 8px rgba($success, 0.5);
+    }
+
+    &--offline {
+      background: $error;
+      box-shadow: 0 0 8px rgba($error, 0.5);
+    }
+
+    &--degraded {
+      background: $warning;
+      box-shadow: 0 0 8px rgba($warning, 0.5);
+    }
+  }
+}
+
+// ===== Stat Display =====
+
+.stat {
+  &__value {
+    font-size: $font-size-3xl;
+    font-weight: $font-weight-bold;
+    line-height: $line-height-tight;
+    @include text-gradient;
+
+    @include md {
+      font-size: $font-size-4xl;
+    }
+  }
+
+  &__label {
+    font-size: $font-size-sm;
+    color: var(--text-muted);
+    margin-top: $spacing-1;
+  }
+
+  &__row {
+    @include flex-between;
+    padding: $spacing-3 0;
+    border-bottom: 1px solid var(--border);
+
+    &:last-child {
+      border-bottom: none;
+    }
+  }
+
+  &__row-label {
+    color: var(--text-secondary);
+  }
+
+  &__row-value {
+    font-weight: $font-weight-medium;
+    font-family: var(--font-mono);
+  }
+}
+
+// ===== Progress Bar =====
+
+.progress {
+  &__header {
+    @include flex-between;
+    font-size: $font-size-sm;
+    margin-bottom: $spacing-2;
+  }
+
+  &__track {
+    height: 8px;
+    background: var(--bg-tertiary);
+    border-radius: $radius-full;
+    overflow: hidden;
+  }
+
+  &__fill {
+    height: 100%;
+    background: linear-gradient(90deg, $primary, $secondary);
+    border-radius: $radius-full;
+    transition: width $transition-slow;
+
+    &--warning {
+      background: $warning;
+    }
+
+    &--error {
+      background: $error;
+    }
+
+    &--success {
+      background: $success;
+    }
+  }
+}
+
+// ===== Scrollable Areas =====
+
+.scrollable {
+  @include custom-scrollbar;
+  overflow-y: auto;
+}
+
+// ===== Loading States =====
+
+.spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--border);
+  border-top-color: $primary;
+  border-radius: 50%;
+  @include spin-animation;
+
+  &--sm {
+    width: 16px;
+    height: 16px;
+  }
+
+  &--lg {
+    width: 32px;
+    height: 32px;
+    border-width: 3px;
+  }
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--bg-tertiary) 25%,
+    var(--bg-card-hover) 50%,
+    var(--bg-tertiary) 75%
+  );
+  background-size: 200% 100%;
+  animation: skeleton 1.5s ease-in-out infinite;
+  border-radius: $radius-sm;
+}
+
+@keyframes skeleton {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+// ===== Empty State =====
+
+.empty-state {
+  @include flex-column;
+  @include flex-center;
+  padding: $spacing-8;
+  text-align: center;
+  color: var(--text-muted);
+
+  &__icon {
+    font-size: $font-size-4xl;
+    margin-bottom: $spacing-4;
+    opacity: 0.5;
+  }
+
+  &__text {
+    font-size: $font-size-sm;
+  }
+}
+
+// ===== Transitions =====
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity $transition-base;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+.slide-enter-active,
+.slide-leave-active {
+  transition: all $transition-base;
+}
+
+.slide-enter-from {
+  opacity: 0;
+  transform: translateY(-10px);
+}
+
+.slide-leave-to {
+  opacity: 0;
+  transform: translateY(10px);
+}
