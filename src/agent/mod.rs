@@ -25,5 +25,5 @@ pub use orchestrator::{AgentOrchestrator, SubAgent, AgentTask, AgentResult};
 pub use tools::{ToolRegistry, Tool, ToolCall, ToolResult, ToolSchema};
 pub use planner::{PlanningEngine, Plan, PlanStep, PlanStatus, ApprovalState};
 pub use streaming::{StreamingResponse, StreamChunk, StreamHandle};
-pub use scheduler::{Scheduler, ScheduledTask, Reminder, NotificationType};
+pub use scheduler::{Scheduler, ScheduledTask, Reminder, NotificationType, Priority};
 pub use recovery::{RecoveryStrategy, RetryPolicy, CircuitBreaker, RecoveryAction};

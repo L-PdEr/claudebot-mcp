@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, RwLock, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
@@ -24,9 +24,35 @@ use super::proto::{
     HealthRequest, HealthResponse, StatusRequest, StatusResponse,
     SpawnWorkerRequest, SpawnWorkerResponse, KillWorkerRequest, KillWorkerResponse,
     ListWorkersRequest, ListWorkersResponse, WorkerStatusRequest, WorkerStatusResponse,
-    ExecuteOnWorkerRequest, PoolStats as ProtoPoolStats,
+    ExecuteOnWorkerRequest, PoolStats as ProtoPoolStats, WorkerInfo as ProtoWorkerInfo,
 };
 use super::types::ClaudeCliOutput;
+use crate::worker_pool::{WorkerPool, WorkerConfig, PoolConfig, PermissionLevel as WPPermissionLevel, WorkerStatus};
+
+/// Convert WorkerStatus to proto WorkerState
+fn worker_status_to_proto(status: &WorkerStatus) -> (i32, Option<String>) {
+    use super::proto::WorkerState;
+    match status {
+        WorkerStatus::Starting => (WorkerState::Starting as i32, None),
+        WorkerStatus::Idle => (WorkerState::Idle as i32, None),
+        WorkerStatus::Busy => (WorkerState::Busy as i32, None),
+        WorkerStatus::Failed(reason) => (WorkerState::Failed as i32, Some(reason.clone())),
+        WorkerStatus::Stopped => (WorkerState::Stopped as i32, None),
+    }
+}
+
+/// Convert proto PermissionLevel to worker pool PermissionLevel
+fn proto_to_wp_permission(level: i32) -> WPPermissionLevel {
+    use super::proto::PermissionLevel;
+    match level {
+        x if x == PermissionLevel::Sandbox as i32 => WPPermissionLevel::Sandbox,
+        x if x == PermissionLevel::Standard as i32 => WPPermissionLevel::Standard,
+        x if x == PermissionLevel::Elevated as i32 => WPPermissionLevel::Elevated,
+        x if x == PermissionLevel::Bypass as i32 => WPPermissionLevel::Bypass,
+        x if x == PermissionLevel::Root as i32 => WPPermissionLevel::Root,
+        _ => WPPermissionLevel::Sandbox,
+    }
+}
 
 /// gRPC server configuration
 #[derive(Debug, Clone)]
@@ -69,17 +95,33 @@ pub struct GrpcBridgeState {
     requests_processed: AtomicU64,
     sessions: RwLock<HashMap<i64, String>>,
     rate_limits: RwLock<HashMap<i64, RateLimitEntry>>,
+    /// Worker pool for distributed execution
+    worker_pool: Arc<Mutex<WorkerPool>>,
 }
 
 impl GrpcBridgeState {
     pub fn new(config: GrpcBridgeConfig) -> Self {
+        let pool_config = PoolConfig {
+            max_workers: 10,
+            default_timeout: Duration::from_secs(config.timeout_seconds),
+            ..Default::default()
+        };
+
         Self {
             config,
             start_time: Instant::now(),
             requests_processed: AtomicU64::new(0),
             sessions: RwLock::new(HashMap::new()),
             rate_limits: RwLock::new(HashMap::new()),
+            worker_pool: Arc::new(Mutex::new(WorkerPool::new(pool_config))),
         }
+    }
+
+    /// Initialize and start the worker pool
+    pub async fn start_worker_pool(&self) {
+        let mut pool = self.worker_pool.lock().await;
+        pool.start().await;
+        info!("Worker pool started for gRPC bridge");
     }
 
     async fn check_rate_limit(&self, chat_id: i64) -> bool {
@@ -249,61 +291,204 @@ impl BridgeService for GrpcBridgeServiceImpl {
 
     async fn spawn_worker(
         &self,
-        _request: Request<SpawnWorkerRequest>,
+        request: Request<SpawnWorkerRequest>,
     ) -> Result<Response<SpawnWorkerResponse>, Status> {
-        // TODO: Implement with WorkerPool integration
-        Ok(Response::new(SpawnWorkerResponse {
-            success: false,
-            worker_id: String::new(),
-            error: Some("Worker pool not yet integrated".to_string()),
-        }))
+        let req = request.into_inner();
+
+        // Parse permission level
+        let permission_level = proto_to_wp_permission(req.permission_level);
+
+        // Create worker config
+        let working_dir = req.working_dir
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.state.config.working_dir.clone());
+
+        let timeout = req.timeout_seconds
+            .map(|s| Duration::from_secs(s as u64))
+            .unwrap_or_else(|| Duration::from_secs(self.state.config.timeout_seconds));
+
+        let config = WorkerConfig {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: if req.name.is_empty() { "worker".to_string() } else { req.name },
+            working_dir,
+            permission_level,
+            timeout,
+            ..Default::default()
+        };
+
+        // Spawn worker
+        let pool = self.state.worker_pool.lock().await;
+        match pool.spawn_worker(config).await {
+            Ok(worker_id) => {
+                info!("Spawned worker {}", worker_id);
+                Ok(Response::new(SpawnWorkerResponse {
+                    success: true,
+                    worker_id,
+                    error: None,
+                }))
+            }
+            Err(e) => Ok(Response::new(SpawnWorkerResponse {
+                success: false,
+                worker_id: String::new(),
+                error: Some(e.to_string()),
+            })),
+        }
     }
 
     async fn kill_worker(
         &self,
-        _request: Request<KillWorkerRequest>,
+        request: Request<KillWorkerRequest>,
     ) -> Result<Response<KillWorkerResponse>, Status> {
-        Ok(Response::new(KillWorkerResponse {
-            success: false,
-            error: Some("Worker pool not yet integrated".to_string()),
-        }))
+        let req = request.into_inner();
+
+        let pool = self.state.worker_pool.lock().await;
+        match pool.kill_worker(&req.worker_id).await {
+            Ok(()) => {
+                info!("Killed worker {}", req.worker_id);
+                Ok(Response::new(KillWorkerResponse {
+                    success: true,
+                    error: None,
+                }))
+            }
+            Err(e) => Ok(Response::new(KillWorkerResponse {
+                success: false,
+                error: Some(e.to_string()),
+            })),
+        }
     }
 
     async fn list_workers(
         &self,
         _request: Request<ListWorkersRequest>,
     ) -> Result<Response<ListWorkersResponse>, Status> {
+        let pool = self.state.worker_pool.lock().await;
+        let workers = pool.list_workers().await;
+        let stats = pool.stats().await;
+
+        let proto_workers: Vec<ProtoWorkerInfo> = workers
+            .into_iter()
+            .map(|w| {
+                let (state, failure_reason) = worker_status_to_proto(&w.status);
+                ProtoWorkerInfo {
+                    id: w.id,
+                    name: w.name,
+                    state,
+                    permission_level: w.permission_level as i32,
+                    task_count: w.task_count,
+                    error_count: w.error_count,
+                    uptime_seconds: w.uptime_secs,
+                    idle_seconds: w.idle_secs,
+                    failure_reason,
+                }
+            })
+            .collect();
+
         Ok(Response::new(ListWorkersResponse {
-            workers: vec![],
+            workers: proto_workers,
             pool_stats: Some(ProtoPoolStats {
-                total_workers: 0,
-                idle_workers: 0,
-                busy_workers: 0,
-                failed_workers: 0,
-                total_tasks: 0,
-                total_errors: 0,
-                utilization: 0.0,
+                total_workers: stats.total_workers as u32,
+                idle_workers: stats.idle_workers as u32,
+                busy_workers: stats.busy_workers as u32,
+                failed_workers: stats.failed_workers as u32,
+                total_tasks: stats.total_tasks,
+                total_errors: stats.total_errors,
+                utilization: stats.utilization(),
             }),
         }))
     }
 
     async fn worker_status(
         &self,
-        _request: Request<WorkerStatusRequest>,
+        request: Request<WorkerStatusRequest>,
     ) -> Result<Response<WorkerStatusResponse>, Status> {
-        Ok(Response::new(WorkerStatusResponse {
-            found: false,
-            worker: None,
-        }))
+        let req = request.into_inner();
+        let pool = self.state.worker_pool.lock().await;
+
+        if let Some(worker) = pool.get_worker(&req.worker_id).await {
+            let w = worker.lock().await;
+            let info = w.info();
+            let (state, failure_reason) = worker_status_to_proto(&info.status);
+            Ok(Response::new(WorkerStatusResponse {
+                found: true,
+                worker: Some(ProtoWorkerInfo {
+                    id: info.id,
+                    name: info.name,
+                    state,
+                    permission_level: info.permission_level as i32,
+                    task_count: info.task_count,
+                    error_count: info.error_count,
+                    uptime_seconds: info.uptime_secs,
+                    idle_seconds: info.idle_secs,
+                    failure_reason,
+                }),
+            }))
+        } else {
+            Ok(Response::new(WorkerStatusResponse {
+                found: false,
+                worker: None,
+            }))
+        }
     }
 
     type ExecuteOnWorkerStream = ExecuteStream;
 
     async fn execute_on_worker(
         &self,
-        _request: Request<ExecuteOnWorkerRequest>,
+        request: Request<ExecuteOnWorkerRequest>,
     ) -> Result<Response<Self::ExecuteOnWorkerStream>, Status> {
-        Err(Status::unimplemented("Worker pool not yet integrated"))
+        let req = request.into_inner();
+        let start = Instant::now();
+
+        // Check admin access
+        if !self.state.is_admin(req.chat_id) {
+            return Err(Status::permission_denied("Not authorized"));
+        }
+
+        // Check rate limit
+        if !self.state.check_rate_limit(req.chat_id).await {
+            return Err(Status::resource_exhausted("Rate limit exceeded"));
+        }
+
+        let (tx, rx) = mpsc::channel(32);
+        let worker_pool = self.state.worker_pool.clone();
+        let worker_id = req.worker_id.clone();
+        let task = req.task.clone();
+        let chat_id = req.chat_id;
+
+        tokio::spawn(async move {
+            let pool = worker_pool.lock().await;
+            let result = pool.execute(&task, Some(&worker_id)).await;
+
+            let chunk = match result {
+                Ok(worker_result) => ExecuteChunk {
+                    r#type: if worker_result.success {
+                        ChunkType::Result as i32
+                    } else {
+                        ChunkType::Error as i32
+                    },
+                    content: worker_result.output,
+                    session_id: None,
+                    cost_usd: None,
+                    duration_ms: Some(worker_result.duration.as_millis() as u64),
+                    is_final: true,
+                    error: worker_result.error,
+                },
+                Err(e) => ExecuteChunk {
+                    r#type: ChunkType::Error as i32,
+                    content: String::new(),
+                    session_id: None,
+                    cost_usd: None,
+                    duration_ms: Some(start.elapsed().as_millis() as u64),
+                    is_final: true,
+                    error: Some(e.to_string()),
+                },
+            };
+
+            let _ = tx.send(Ok(chunk)).await;
+            info!("Worker {} executed task for chat {}", worker_id, chat_id);
+        });
+
+        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
     }
 
     async fn read_file(

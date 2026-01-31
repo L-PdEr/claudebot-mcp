@@ -37,6 +37,7 @@ impl Default for LlamaWorkerConfig {
 }
 
 /// Llama Worker for local LLM operations
+#[derive(Clone)]
 pub struct LlamaWorker {
     config: LlamaWorkerConfig,
     client: reqwest::Client,

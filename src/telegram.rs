@@ -30,6 +30,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::RwLock;
 
+use crate::agent::{
+    PlanningEngine, ReflectionEngine, Scheduler, ToolRegistry, AgentOrchestrator,
+};
 use crate::autonomous::{
     AutonomousLearner, BackgroundProcessor, ContextManager, GoalTracker, FeedbackLoop,
 };
@@ -210,6 +213,14 @@ pub async fn run_telegram_bot() -> Result<()> {
         tracing::info!("Pre-flight checker: Claude CLI available");
     }
 
+    // Initialize Phase 8: Agent system components
+    let reflection_engine = ReflectionEngine::new();
+    let planning_engine = PlanningEngine::new();
+    let (scheduler, scheduler_rx) = Scheduler::new(100);
+    let tool_registry = ToolRegistry::new();
+    let agent_orchestrator = AgentOrchestrator::new();
+    tracing::info!("Agent system components initialized");
+
     let handler_data = Arc::new(BotData {
         allowed_users,
         base_working_dir: working_dir,
@@ -238,9 +249,19 @@ pub async fn run_telegram_bot() -> Result<()> {
         }),
         feedback_loop: FeedbackLoop::new(),
         background_processor: BackgroundProcessor::new(),
+        // Phase 8: Agent system components
+        reflection_engine,
+        planning_engine,
+        scheduler,
+        tool_registry: RwLock::new(tool_registry),
+        agent_orchestrator,
     });
     tracing::info!("Autonomous behavior system initialized");
     tracing::info!("Goals database: {:?}", goals_db_path);
+
+    // Start the scheduler background loop
+    handler_data.scheduler.start().await;
+    tracing::info!("Scheduler started");
 
     // Auto-load system context on startup
     let context_result = load_context(&handler_data);
@@ -337,6 +358,27 @@ pub async fn run_telegram_bot() -> Result<()> {
             })),
         };
         lifecycle_clone.run(callbacks).await;
+    });
+
+    // Start scheduler notification processor
+    let bot_for_scheduler = Bot::new(token.clone());
+    tokio::spawn(async move {
+        let mut rx = scheduler_rx;
+        while let Some(reminder) = rx.recv().await {
+            let notification_text = format!(
+                "{} *Reminder*\n\n{}",
+                reminder.notification_type.emoji(),
+                reminder.message
+            );
+            if let Err(e) = bot_for_scheduler
+                .send_message(ChatId(reminder.chat_id), notification_text)
+                .parse_mode(ParseMode::MarkdownV2)
+                .await
+            {
+                tracing::warn!("Failed to send scheduled notification: {}", e);
+            }
+        }
+        tracing::warn!("Scheduler notification processor stopped");
     });
 
     // Build explicit handler tree with callback query support
@@ -682,6 +724,12 @@ struct BotData {
     goal_tracker: GoalTracker,
     feedback_loop: FeedbackLoop,
     background_processor: BackgroundProcessor,
+    // Phase 8: Agent system components
+    reflection_engine: ReflectionEngine,
+    planning_engine: PlanningEngine,
+    scheduler: Scheduler,
+    tool_registry: RwLock<ToolRegistry>,
+    agent_orchestrator: AgentOrchestrator,
 }
 
 /// Pending permission request waiting for user approval
@@ -1386,10 +1434,35 @@ async fn handle_text(
                 data.update_ui_context(chat_id.0, |ctx| ctx.set_file(&file_path)).await;
             }
 
+            // Phase 8: Reflection-based quality evaluation (non-blocking background task)
+            // Only evaluate substantive responses, not simple commands
+            if data.reflection_engine.should_evaluate(&response.text, false) {
+                let reflection_prompt = enhanced_prompt.clone();
+                let reflection_response = response.text.clone();
+                let reflection_engine = data.reflection_engine.clone();
+                let llama = data.llama_worker.clone();
+                tokio::spawn(async move {
+                    match reflection_engine.evaluate(&reflection_prompt, &reflection_response, &llama).await {
+                        Ok(score) => {
+                            if score.should_retry {
+                                tracing::info!(
+                                    "Reflection: response quality {:.2} - improvements suggested: {:?}",
+                                    score.overall,
+                                    score.improvements
+                                );
+                            } else {
+                                tracing::debug!("Reflection: response quality {:.2}", score.overall);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!("Reflection evaluation skipped: {}", e);
+                        }
+                    }
+                });
+            }
+
             // Send response
             send_long_message(bot, chat_id, &response.text).await?;
-
-            // Suggestions removed - user found buttons annoying
         }
         Err(e) => {
             // Store error in context for "fix it" support
@@ -3036,8 +3109,33 @@ async fn get_memory_context_async(data: &BotData, prompt: &str) -> String {
     context
 }
 
-/// Extract facts from Claude's response for learning (async with embeddings)
+/// Extract facts from Claude's response for learning using LLM-based extraction
+///
+/// Uses the autonomous learner module with Ollama for intelligent fact extraction,
+/// falling back to pattern matching if LLM is unavailable.
 async fn extract_and_learn_facts_async(data: &BotData, response: &str, user_id: i64) {
+    // Skip short responses
+    if response.len() < 50 {
+        return;
+    }
+
+    // Use autonomous learner for LLM-based fact extraction
+    let facts = data.autonomous_learner.analyze_message(response, user_id, &data.llama_worker).await;
+
+    if !facts.is_empty() {
+        // Store extracted facts in memory
+        if let Ok(store) = data.memory_store.lock() {
+            let source = format!("auto_learn_response_{}", user_id);
+            for fact in &facts {
+                if let Ok(id) = store.learn(&fact.content, &fact.category, &source, fact.confidence as f64) {
+                    tracing::debug!("Auto-learned fact: {} ({})", &id[..8.min(id.len())], fact.category);
+                }
+            }
+        }
+        return;
+    }
+
+    // Fallback: Pattern-based extraction if LLM extraction found nothing
     let patterns = [
         "I'll remember",
         "I've noted",

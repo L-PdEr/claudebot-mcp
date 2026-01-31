@@ -196,6 +196,7 @@ impl Default for ReflectionConfig {
 }
 
 /// Reflection engine for self-correction
+#[derive(Clone)]
 pub struct ReflectionEngine {
     config: ReflectionConfig,
 }
