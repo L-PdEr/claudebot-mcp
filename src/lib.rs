@@ -38,6 +38,7 @@ pub mod circle;
 pub mod claude;
 pub mod config;
 pub mod conversation;
+pub mod dashboard;
 pub mod embeddings;
 pub mod feedback;
 pub mod graph;

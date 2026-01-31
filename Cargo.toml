@@ -82,6 +82,10 @@ async-trait = "0.1"
 # TOML parsing (for skills)
 toml = "0.8"
 
+# Static file embedding (for dashboard)
+rust-embed = "8"
+mime_guess = "2"
+
 [build-dependencies]
 tonic-build = "0.12"
 
