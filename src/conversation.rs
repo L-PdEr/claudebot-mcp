@@ -100,7 +100,7 @@ impl ConversationStore {
         )?;
 
         // Trim old messages if over limit
-        self.trim_conversation(chat_id)?;
+        self.trim_default(chat_id)?;
 
         debug!("Added {} message to chat {}", role, chat_id);
         Ok(())
@@ -132,7 +132,7 @@ impl ConversationStore {
         match result {
             Ok(()) => {
                 self.conn.execute("COMMIT", [])?;
-                self.trim_conversation(chat_id)?;
+                self.trim_default(chat_id)?;
                 debug!("Added exchange to chat {}", chat_id);
                 Ok(())
             }
@@ -230,9 +230,9 @@ impl ConversationStore {
         Ok(summary)
     }
 
-    /// Trim conversation to max messages
-    fn trim_conversation(&self, chat_id: i64) -> Result<()> {
-        self.conn.execute(
+    /// Trim conversation to a specific number of messages
+    pub fn trim_conversation(&self, chat_id: i64, keep_count: usize) -> Result<usize> {
+        let rows = self.conn.execute(
             "DELETE FROM conversations
              WHERE chat_id = ?1 AND id NOT IN (
                  SELECT id FROM conversations
@@ -240,8 +240,36 @@ impl ConversationStore {
                  ORDER BY timestamp DESC
                  LIMIT ?2
              )",
-            params![chat_id, self.max_messages],
+            params![chat_id, keep_count],
         )?;
+        Ok(rows)
+    }
+
+    /// Get chat IDs with old conversations that have many messages
+    /// Returns chats older than `age_seconds` with more than `min_messages`
+    pub fn get_stale_conversations(&self, age_seconds: i64, min_messages: usize) -> Result<Vec<i64>> {
+        let cutoff = chrono::Utc::now().timestamp_millis() - (age_seconds * 1000);
+
+        let mut stmt = self.conn.prepare(
+            "SELECT chat_id, COUNT(*) as msg_count, MAX(timestamp) as last_msg
+             FROM conversations
+             GROUP BY chat_id
+             HAVING msg_count > ?1 AND last_msg < ?2
+             ORDER BY msg_count DESC"
+        )?;
+
+        let chats = stmt.query_map(params![min_messages as i64, cutoff], |row| {
+            row.get::<_, i64>(0)
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+        Ok(chats)
+    }
+
+    /// Internal trim (uses default max)
+    fn trim_default(&self, chat_id: i64) -> Result<()> {
+        self.trim_conversation(chat_id, self.max_messages)?;
         Ok(())
     }
 

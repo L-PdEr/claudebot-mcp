@@ -22,5 +22,5 @@ mod feedback_loop;
 pub use learner::{AutonomousLearner, LearnedFact, LearningConfig};
 pub use context_manager::{ContextManager, EnrichedContext, ContextConfig};
 pub use background::{BackgroundProcessor, BackgroundConfig, BackgroundTask};
-pub use goals::{GoalTracker, Goal, GoalStatus};
+pub use goals::{GoalTracker, Goal, GoalStatus, GoalStats};
 pub use feedback_loop::{FeedbackLoop, FeedbackSignal, MemoryFeedback};

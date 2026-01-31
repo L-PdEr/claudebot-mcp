@@ -27,6 +27,7 @@
 //!                                     └── Tools (20+ MCP tools)
 //! ```
 
+pub mod agent;
 pub mod auto_review;
 pub mod autonomous;
 pub mod bridge;

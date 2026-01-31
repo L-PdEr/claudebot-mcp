@@ -101,6 +101,10 @@ pub async fn run_telegram_bot() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| working_dir.join("conversations.db"));
 
+    let goals_db_path = std::env::var("GOALS_DB_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| working_dir.join("goals.db"));
+
     // Create base working directory
     tokio::fs::create_dir_all(&working_dir).await?;
 
@@ -228,11 +232,15 @@ pub async fn run_telegram_bot() -> Result<()> {
         // Phase 7: Autonomous behavior components
         autonomous_learner: AutonomousLearner::new(),
         context_manager: ContextManager::new(),
-        goal_tracker: GoalTracker::new(),
+        goal_tracker: GoalTracker::open(&goals_db_path).unwrap_or_else(|e| {
+            tracing::warn!("Failed to open goals DB: {}, using in-memory", e);
+            GoalTracker::new()
+        }),
         feedback_loop: FeedbackLoop::new(),
         background_processor: BackgroundProcessor::new(),
     });
-    tracing::info!("Autonomous behavior system initialized (goals, learning, feedback, background)");
+    tracing::info!("Autonomous behavior system initialized");
+    tracing::info!("Goals database: {:?}", goals_db_path);
 
     // Auto-load system context on startup
     let context_result = load_context(&handler_data);
@@ -268,7 +276,65 @@ pub async fn run_telegram_bot() -> Result<()> {
                 }
             })),
             on_decay: None,
-            on_compress: None,
+            on_compress: Some(Box::new({
+                let data = Arc::clone(&data);
+                move || {
+                    let data = Arc::clone(&data);
+                    Box::pin(async move {
+                        // Compress old conversations during idle
+                        if !data.llama_worker.is_available().await {
+                            return Ok(());
+                        }
+
+                        // Get conversations that need compression (older than 1 hour, > 20 messages)
+                        let conversations_to_compress = {
+                            let store = data.conversation_store.lock()
+                                .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+                            store.get_stale_conversations(3600, 20)?
+                        };
+
+                        for chat_id in conversations_to_compress.into_iter().take(3) {
+                            // Get the messages
+                            let messages = {
+                                let store = data.conversation_store.lock()
+                                    .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+                                store.get_history(chat_id, 50)?
+                            };
+
+                            if messages.len() < 10 {
+                                continue;
+                            }
+
+                            // Build context for compression
+                            let context: Vec<(&str, &str)> = messages.iter()
+                                .map(|m| (m.role.as_str(), m.content.as_str()))
+                                .collect();
+
+                            // Compress using Llama (target 30% reduction)
+                            if let Ok(summary) = data.llama_worker.compress_context(&context, 0.3).await {
+                                // Store the compressed version as a memory
+                                if let Ok(store) = data.memory_store.lock() {
+                                    let _ = store.learn(
+                                        &format!("Conversation summary: {}", summary),
+                                        "conversation_summary",
+                                        &format!("chat_{}", chat_id),
+                                        0.8
+                                    );
+                                }
+
+                                // Trim the old messages
+                                if let Ok(store) = data.conversation_store.lock() {
+                                    let _ = store.trim_conversation(chat_id, 10);
+                                }
+
+                                tracing::info!("Compressed conversation {} ({} messages)", chat_id, messages.len());
+                            }
+                        }
+
+                        Ok(())
+                    })
+                }
+            })),
         };
         lifecycle_clone.run(callbacks).await;
     });
@@ -1532,10 +1598,10 @@ async fn handle_command(
                 /help - Show help\n\
                 /usage - Token usage & costs\n\
                 /memory - View memories\n\
-                /learn <fact> - Teach me something\n\
-                /graph - View knowledge graph\n\
-                /extract <text> - Extract entities\n\n\
-                Just send messages - I remember context!"
+                /goals - View tracked goals\n\
+                /feedback - Learning statistics\n\
+                /graph - View knowledge graph\n\n\
+                I learn autonomously from conversations!"
             ).await?;
         }
 
@@ -1549,13 +1615,13 @@ async fn handle_command(
                 Conversation:\n\
                 /history - View recent conversation\n\
                 /clear - Clear conversation history\n\n\
-                Memory (Facts):\n\
+                Memory (Autonomous):\n\
                 /memory - View memory stats\n\
                 /memory search <query> - Search memories\n\
-                /learn <fact> - Teach me a fact\n\
+                /goals - View/manage tracked goals\n\
+                /feedback - Learning statistics\n\
                 /context - Load system context\n\
-                /graph - View knowledge graph\n\
-                /extract <text> - Extract entities\n\n\
+                /graph - View knowledge graph\n\n\
                 Budget & Stats:\n\
                 /usage - View token usage\n\
                 /limits - View/set limits\n\
@@ -1797,19 +1863,20 @@ async fn handle_command(
                     /memory hybrid <query> - Hybrid search (keyword + vector)\n\
                     /memory backfill - Generate embeddings for memories\n\
                     /memory embeddings - View embedding stats\n\
-                    /memory recent - View recent memories\n\
-                    /learn <fact> - Learn a new fact"
+                    /memory recent - View recent memories\n\n\
+                    Learning is now autonomous - I extract facts from conversations!"
                 ).await?;
             }
         }
 
-        "/learn" => {
-            if args.is_empty() {
-                bot.send_message(chat_id, "Usage: /learn <fact to remember>").await?;
-            } else {
-                let result = learn_fact_async(data, args, user_id).await;
-                bot.send_message(chat_id, result).await?;
-            }
+        "/goals" => {
+            let result = handle_goals_command(data, args, user_id).await;
+            bot.send_message(chat_id, result).await?;
+        }
+
+        "/feedback" | "/learning" => {
+            let result = handle_feedback_command(data, user_id).await;
+            bot.send_message(chat_id, result).await?;
         }
 
         "/graph" | "/entities" => {
@@ -2253,7 +2320,8 @@ fn format_memory_stats(data: &BotData) -> Result<String> {
     for (cat, count) in &stats.by_category {
         msg.push_str(&format!("\n- {}: {}", cat, count));
     }
-    msg.push_str("\n\nCommands:\n/memory search <query>\n/memory recent\n/learn <fact>");
+    msg.push_str("\n\nCommands:\n/memory search <query>\n/memory recent\n/goals");
+    msg.push_str("\n\nLearning is autonomous - I extract facts from conversations!");
     Ok(msg)
 }
 
@@ -2284,7 +2352,7 @@ fn get_recent_memories(data: &BotData) -> Result<String> {
     let entries = store.get_recent(10)?;
 
     if entries.is_empty() {
-        return Ok("No memories stored yet.\nUse /learn <fact> to add memories.".to_string());
+        return Ok("No memories stored yet.\nI learn automatically from our conversations!".to_string());
     }
 
     let mut msg = "Recent Memories:\n".to_string();
@@ -2491,6 +2559,7 @@ fn format_embedding_stats(data: &BotData) -> Result<String> {
     ))
 }
 
+#[allow(dead_code)]
 fn learn_fact(data: &BotData, fact: &str, user_id: i64) -> String {
     let store = data.memory_store.lock().unwrap();
 
@@ -2504,7 +2573,7 @@ fn learn_fact(data: &BotData, fact: &str, user_id: i64) -> String {
     }
 }
 
-/// Learn a fact with embedding (async version)
+#[allow(dead_code)]
 async fn learn_fact_async(data: &BotData, fact: &str, user_id: i64) -> String {
     // Get embedder outside the lock
     let embedder = {
@@ -2620,9 +2689,172 @@ async fn extract_entities(data: &BotData, text: &str) -> String {
     }
 }
 
-// ============ Conversation Functions ============
+// ============ Autonomous Commands ============
+
+/// Handle /goals command
+async fn handle_goals_command(data: &BotData, args: &str, user_id: i64) -> String {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let subcommand = parts.first().copied().unwrap_or("");
+
+    match subcommand {
+        "" | "list" | "active" => {
+            // Show active goals
+            let goals = data.goal_tracker.get_active_goals(user_id).await;
+            if goals.is_empty() {
+                return "No active goals.\n\nGoals are extracted automatically when you say things like:\n• \"I need to...\"\n• \"TODO: ...\"\n• \"I want to...\"".to_string();
+            }
+
+            let mut msg = format!("Active Goals ({}):\n\n", goals.len());
+            for goal in goals {
+                msg.push_str(&format!("{}\n", goal.format()));
+            }
+            msg
+        }
+
+        "all" => {
+            // Show all goals including completed
+            let goals = data.goal_tracker.get_all_goals(user_id).await;
+            if goals.is_empty() {
+                return "No goals tracked yet.".to_string();
+            }
+
+            let mut msg = format!("All Goals ({}):\n\n", goals.len());
+            for goal in goals.iter().take(20) {
+                msg.push_str(&format!("{}\n", goal.format_short()));
+            }
+            if goals.len() > 20 {
+                msg.push_str(&format!("\n... and {} more", goals.len() - 20));
+            }
+            msg
+        }
+
+        "stats" => {
+            // Show statistics
+            match data.goal_tracker.get_stats(user_id) {
+                Ok(stats) => format!(
+                    "Goal Statistics:\n\n\
+                    Total: {}\n\
+                    Active: {}\n\
+                    Completed: {}\n\
+                    Paused: {}\n\
+                    Completion rate: {:.0}%",
+                    stats.total,
+                    stats.active,
+                    stats.completed,
+                    stats.paused,
+                    if stats.total > 0 {
+                        (stats.completed as f64 / stats.total as f64) * 100.0
+                    } else {
+                        0.0
+                    }
+                ),
+                Err(e) => format!("Failed to get stats: {}", e),
+            }
+        }
+
+        "complete" | "done" => {
+            // Mark a goal as complete by partial match
+            if parts.len() < 2 {
+                return "Usage: /goals complete <partial description>".to_string();
+            }
+            let search = parts[1..].join(" ").to_lowercase();
+            let goals = data.goal_tracker.get_active_goals(user_id).await;
+
+            for goal in goals {
+                if goal.description.to_lowercase().contains(&search) {
+                    if let Some(updated) = data.goal_tracker.update_status(&goal.id, crate::autonomous::GoalStatus::Completed).await {
+                        return format!("Completed: {}", updated.format_short());
+                    }
+                }
+            }
+            format!("No active goal matching '{}'", search)
+        }
+
+        "pause" => {
+            if parts.len() < 2 {
+                return "Usage: /goals pause <partial description>".to_string();
+            }
+            let search = parts[1..].join(" ").to_lowercase();
+            let goals = data.goal_tracker.get_active_goals(user_id).await;
+
+            for goal in goals {
+                if goal.description.to_lowercase().contains(&search) {
+                    if let Some(updated) = data.goal_tracker.update_status(&goal.id, crate::autonomous::GoalStatus::Paused).await {
+                        return format!("Paused: {}", updated.format_short());
+                    }
+                }
+            }
+            format!("No active goal matching '{}'", search)
+        }
+
+        _ => {
+            "Goal Commands:\n\n\
+            /goals - Show active goals\n\
+            /goals all - Show all goals\n\
+            /goals stats - Show statistics\n\
+            /goals complete <text> - Mark goal as done\n\
+            /goals pause <text> - Pause a goal\n\n\
+            Goals are extracted automatically from conversation!".to_string()
+        }
+    }
+}
+
+/// Handle /feedback command - show learning statistics
+async fn handle_feedback_command(data: &BotData, user_id: i64) -> String {
+    let mut msg = String::from("Learning Statistics\n\n");
+
+    // Feedback loop stats
+    let fb_stats = data.feedback_loop.stats().await;
+    msg.push_str(&format!(
+        "Feedback Loop:\n\
+        • Total signals: {}\n\
+        • Positive: {}\n\
+        • Negative: {}\n\
+        • Corrections: {}\n\
+        • Adjustments made: {}\n\n",
+        fb_stats.total_signals,
+        fb_stats.positive_count,
+        fb_stats.negative_count,
+        fb_stats.corrections_count,
+        fb_stats.adjustments_made
+    ));
+
+    // Autonomous learner stats
+    let learn_stats = data.autonomous_learner.stats().await;
+    msg.push_str(&format!(
+        "Autonomous Learning:\n\
+        • Messages analyzed: {}\n\
+        • Facts extracted: {}\n\
+        • Entities found: {}\n\
+        • Preferences learned: {}\n\
+        • Duplicates skipped: {}\n\n",
+        learn_stats.messages_analyzed,
+        learn_stats.facts_extracted,
+        learn_stats.entities_found,
+        learn_stats.preferences_learned,
+        learn_stats.duplicates_skipped
+    ));
+
+    // Goal stats
+    if let Ok(goal_stats) = data.goal_tracker.get_stats(user_id) {
+        msg.push_str(&format!(
+            "Goals:\n\
+            • Total: {}\n\
+            • Active: {}\n\
+            • Completed: {}\n",
+            goal_stats.total,
+            goal_stats.active,
+            goal_stats.completed
+        ));
+    }
+
+    msg
+}
+
+// ============ Legacy Functions (kept for reference, will be removed) ============
 
 /// Get conversation history as context for a prompt
+#[allow(dead_code)]
 fn get_conversation_context(data: &BotData, chat_id: i64) -> String {
     let store = match data.conversation_store.lock() {
         Ok(s) => s,
@@ -2697,6 +2929,7 @@ fn clear_conversation_history(data: &BotData, chat_id: i64) -> String {
 }
 
 /// Get relevant memories as context for a prompt
+#[allow(dead_code)]
 fn get_memory_context(data: &BotData, prompt: &str) -> String {
     let store = data.memory_store.lock().unwrap();
 
@@ -2717,7 +2950,7 @@ fn get_memory_context(data: &BotData, prompt: &str) -> String {
     context
 }
 
-/// Get relevant memories as context for a prompt (async with HyDE + hybrid search + reranking)
+#[allow(dead_code)]
 async fn get_memory_context_async(data: &BotData, prompt: &str) -> String {
     // Get embedder outside the lock
     let embedder = {
