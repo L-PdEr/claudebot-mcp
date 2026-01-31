@@ -146,6 +146,35 @@ impl LifecycleManager {
         self.transition_to(State::Wake);
     }
 
+    /// Manually force sleep state (for /sleep command)
+    /// Returns true if transitioned, false if already sleeping or processing
+    pub fn force_sleep(&self) -> bool {
+        let current = self.current_state();
+        if current == State::Processing {
+            // Don't interrupt active work
+            return false;
+        }
+        if current == State::Sleep {
+            // Already sleeping
+            return false;
+        }
+        self.transition_to(State::Sleep);
+        self.stats.sleep_count.fetch_add(1, Ordering::Relaxed);
+        info!("Forced sleep via command");
+        true
+    }
+
+    /// Manually force wake state (for /wake command)
+    pub fn force_wake(&self) {
+        self.record_activity();
+        if self.current_state() == State::Sleep {
+            self.transition_to(State::Wake);
+            self.stats.wake_count.fetch_add(1, Ordering::Relaxed);
+            self.wake_notify.notify_one();
+            info!("Forced wake via command");
+        }
+    }
+
     /// Transition to a new state
     fn transition_to(&self, new_state: State) {
         let old = self.state.swap(new_state as u8, Ordering::Relaxed);

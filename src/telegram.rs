@@ -169,9 +169,12 @@ pub async fn run_telegram_bot() -> Result<()> {
     // Initialize additional components
     let token_counter = TokenCounter::new();
     let llama_worker = LlamaWorker::new();
+    // Lifecycle manager for background memory tasks (NOT for process timeouts)
+    // idle_timeout only affects when memory consolidation runs, not task execution
+    // Tasks run until completion with NO timeout
     let lifecycle = LifecycleManager::new(LifecycleConfig {
-        idle_timeout: std::time::Duration::from_secs(300), // 5 min
-        sleep_task_interval: std::time::Duration::from_secs(60),
+        idle_timeout: std::time::Duration::from_secs(86400), // 24 hours - practically never sleep during normal use
+        sleep_task_interval: std::time::Duration::from_secs(3600), // Run background tasks hourly when sleeping
         enable_consolidation: true,
         enable_decay: true,
         enable_compression: true,
@@ -1000,7 +1003,8 @@ struct ClaudeResponse {
 const STATUS_UPDATE_INTERVAL_SECS: u64 = 60; // Log "still working" every minute
 
 /// Invoke Claude Code CLI with JSON output for usage tracking
-/// Includes silence detection and total timeout handling
+///
+/// **NO TIMEOUT**: Tasks run until completion. ProcessingGuard protects active work.
 async fn invoke_claude_cli(prompt: &str, working_dir: &PathBuf, autonomous: bool) -> Result<ClaudeResponse> {
     let start = Instant::now();
     tracing::debug!("Invoking claude CLI with prompt length: {}, autonomous: {}", prompt.len(), autonomous);
@@ -1157,9 +1161,9 @@ async fn invoke_claude_cli(prompt: &str, working_dir: &PathBuf, autonomous: bool
                 break;
             }
 
-            // Periodic check (every 100ms)
+            // Periodic poll (every 100ms) - allows status logging updates
             _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                // Just continue the loop for timeout checks
+                // Continue loop - no timeout, just enables periodic status checks
             }
         }
 
@@ -1619,29 +1623,11 @@ async fn handle_text(
             let error_msg = e.to_string();
             data.update_ui_context(chat_id.0, |ctx| ctx.set_error(&error_msg)).await;
 
-            // CRITICAL: Store failed attempt in conversation history for context continuity
+            // Store failed attempt in conversation history for context continuity
             // This ensures the next Claude invocation knows what was attempted
-            let is_timeout = error_msg.contains("Timeout") || error_msg.contains("timeout");
-            let failure_context = if is_timeout {
-                format!(
-                    "[Task timed out after 5 minutes. Original request: {}]\n\n\
-                    Partial output before timeout:\n{}",
-                    text,
-                    error_msg.lines().skip(2).collect::<Vec<_>>().join("\n")
-                )
-            } else {
-                format!("[Task failed: {}]", error_msg.lines().next().unwrap_or("unknown error"))
-            };
+            // Note: Tasks run until completion with NO timeout - failures are from crashes/errors only
+            let failure_context = format!("[Task failed: {}]", error_msg.lines().next().unwrap_or("unknown error"));
             store_conversation_exchange(data, chat_id.0, text, &failure_context);
-
-            // Also learn about the failure for future reference
-            if is_timeout {
-                let timeout_fact = format!(
-                    "Task '{}' timed out - may need to be broken into smaller steps",
-                    truncate(text, 50)
-                );
-                let _ = learn_fact_async(data, &timeout_fact, user_id).await;
-            }
 
             // Send error message
             bot.send_message(chat_id, &error_msg).await?;
@@ -1851,6 +1837,9 @@ async fn handle_command(
                 /stats - System statistics\n\
                 /status - Check bot status\n\
                 /preflight [cmd] - Check tool availability\n\n\
+                Lifecycle:\n\
+                /sleep - Enter sleep mode (run background tasks)\n\
+                /wake - Force wake from sleep\n\n\
                 Planning & Scheduling:\n\
                 /plan <task> - Create execution plan\n\
                 /remind <time> <msg> - Set reminder\n\n\
@@ -2002,9 +1991,9 @@ async fn handle_command(
             let llama_available = data.llama_worker.is_available().await;
 
             let state_str = match lifecycle_stats.current_state {
-                crate::lifecycle::State::Sleep => "Sleep",
-                crate::lifecycle::State::Wake => "Wake",
-                crate::lifecycle::State::Processing => "Processing",
+                crate::lifecycle::State::Sleep => "Sleep 💤",
+                crate::lifecycle::State::Wake => "Wake ⚡",
+                crate::lifecycle::State::Processing => "Processing 🔄",
             };
 
             let msg = format!(
@@ -2020,7 +2009,8 @@ async fn handle_command(
                 - Compressions: {}\n\n\
                 Services:\n\
                 - Llama: {}\n\
-                - Memory: Active",
+                - Memory: Active\n\n\
+                Commands: /sleep /wake",
                 state_str,
                 lifecycle_stats.idle_seconds,
                 lifecycle_stats.wake_count,
@@ -2031,6 +2021,32 @@ async fn handle_command(
                 if llama_available { "Available" } else { "Unavailable" }
             );
             bot.send_message(chat_id, msg).await?;
+        }
+
+        "/sleep" => {
+            let current = data.lifecycle.current_state();
+            if current == crate::lifecycle::State::Processing {
+                bot.send_message(chat_id, "Cannot sleep while processing a task. Try again when done.").await?;
+            } else if data.lifecycle.force_sleep() {
+                bot.send_message(chat_id, "💤 Entering sleep mode.\n\nBackground memory tasks will run.\nSend any message to wake.").await?;
+            } else {
+                bot.send_message(chat_id, "Already sleeping 💤").await?;
+            }
+        }
+
+        "/wake" => {
+            let current = data.lifecycle.current_state();
+            if current == crate::lifecycle::State::Sleep {
+                data.lifecycle.force_wake();
+                bot.send_message(chat_id, "⚡ Awake and ready!").await?;
+            } else {
+                let state_str = match current {
+                    crate::lifecycle::State::Wake => "already awake ⚡",
+                    crate::lifecycle::State::Processing => "currently processing 🔄",
+                    _ => "in unknown state",
+                };
+                bot.send_message(chat_id, format!("Bot is {}", state_str)).await?;
+            }
         }
 
         "/usage" => {
