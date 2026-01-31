@@ -403,7 +403,7 @@ impl MemoryStore {
             params![id, content, category, source, confidence],
         )?;
 
-        debug!("Learned: {} ({})", &id[..8], category);
+        debug!("Learned: {} ({})", &id.get(..8).unwrap_or(&id), category);
         Ok(id)
     }
 
@@ -449,7 +449,7 @@ impl MemoryStore {
             index.insert(id.clone(), emb);
         }
 
-        debug!("Learned with embedding: {} ({})", &id[..8], category);
+        debug!("Learned with embedding: {} ({})", &id.get(..8).unwrap_or(&id), category);
         Ok(id)
     }
 
@@ -809,10 +809,10 @@ impl MemoryStore {
                         params![bytes, id],
                     )?;
                     embedded += 1;
-                    debug!("Backfilled embedding for {}", &id[..8]);
+                    debug!("Backfilled embedding for {}", &id.get(..8).unwrap_or(&id));
                 }
                 Err(e) => {
-                    warn!("Failed to backfill embedding for {}: {}", &id[..8], e);
+                    warn!("Failed to backfill embedding for {}: {}", &id.get(..8).unwrap_or(&id), e);
                 }
             }
         }
