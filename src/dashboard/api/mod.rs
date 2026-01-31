@@ -4,6 +4,7 @@
 
 pub mod health;
 pub mod status;
+pub mod stream;
 
 use axum::{routing::get, Router};
 use std::sync::Arc;
@@ -13,6 +14,10 @@ pub use status::{
     conversations_handler, metrics_handler, status_handler, ApiStatus, BotStatus,
     ConversationItem, ConversationsResponse, ErrorResponse, MetricsResponse, PaginationParams,
     StatusResponse, StatusState,
+};
+pub use stream::{
+    stream_logs, stream_messages, stream_metrics, stream_router, HeartbeatEvent, LogEvent,
+    LogLevel, MessageEvent, MetricsEvent, StreamState,
 };
 
 /// Combined dashboard API state

@@ -31,7 +31,7 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 # gRPC (Bridge with streaming + TLS)
 tonic = { version = "0.12", features = ["tls", "tls-roots", "channel"] }
 prost = "0.13"
-tokio-stream = { version = "0.1", features = ["net"] }
+tokio-stream = { version = "0.1", features = ["net", "sync"] }
 
 # Redis for task coordination
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager", "streams"] }
