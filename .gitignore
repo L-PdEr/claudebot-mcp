@@ -1,3 +1,8 @@
 /target/
 .env
 *.db
+
+# Frontend build output
+frontend/dist/
+frontend/.nuxt/
+frontend/node_modules/
