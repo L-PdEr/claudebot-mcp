@@ -55,6 +55,8 @@ struct HnswIndex {
     idx_to_id: Vec<String>,
     /// Maps memory ID -> HNSW internal index
     id_to_idx: HashMap<String, usize>,
+    /// Expected embedding dimension (set on first insert)
+    dimension: Option<usize>,
 }
 
 impl HnswIndex {
@@ -66,20 +68,46 @@ impl HnswIndex {
             hnsw,
             idx_to_id: Vec::new(),
             id_to_idx: HashMap::new(),
+            dimension: None,
         }
     }
 
     /// Insert a vector with associated memory ID
-    fn insert(&mut self, id: String, embedding: Vec<f32>) {
+    /// Returns false if dimension mismatch (embedding skipped)
+    fn insert(&mut self, id: String, embedding: Vec<f32>) -> bool {
         if self.id_to_idx.contains_key(&id) {
             // Already indexed, skip
-            return;
+            return true;
         }
+
+        // Validate dimension consistency
+        match self.dimension {
+            None => {
+                // First embedding - set the expected dimension
+                self.dimension = Some(embedding.len());
+                debug!("HNSW index dimension set to {}", embedding.len());
+            }
+            Some(expected) if embedding.len() != expected => {
+                // Dimension mismatch - skip this embedding to prevent panic
+                warn!(
+                    "Skipping embedding for '{}': dimension {} != expected {}",
+                    id,
+                    embedding.len(),
+                    expected
+                );
+                return false;
+            }
+            Some(_) => {
+                // Dimension matches, proceed
+            }
+        }
+
         let idx = self.idx_to_id.len();
         let mut searcher = Searcher::default();
         self.hnsw.insert(embedding, &mut searcher);
         self.idx_to_id.push(id.clone());
         self.id_to_idx.insert(id, idx);
+        true
     }
 
     /// Search for k nearest neighbors
@@ -88,6 +116,18 @@ impl HnswIndex {
         let num_elements = self.idx_to_id.len();
         if num_elements == 0 {
             return vec![];
+        }
+
+        // Validate query dimension matches index
+        if let Some(expected) = self.dimension {
+            if query.len() != expected {
+                warn!(
+                    "Query dimension {} != index dimension {}, returning empty results",
+                    query.len(),
+                    expected
+                );
+                return vec![];
+            }
         }
 
         // ef must not exceed the number of indexed elements
@@ -317,13 +357,26 @@ impl MemoryStore {
             return Ok(());
         }
 
-        // Build index
+        // Build index, tracking skipped embeddings due to dimension mismatch
         let mut index = self.hnsw_index.lock().unwrap();
+        let mut indexed = 0;
+        let mut skipped = 0;
         for (id, embedding) in memories {
-            index.insert(id, embedding);
+            if index.insert(id, embedding) {
+                indexed += 1;
+            } else {
+                skipped += 1;
+            }
         }
 
-        info!("Built HNSW index with {} vectors", count);
+        if skipped > 0 {
+            warn!(
+                "Built HNSW index: {} vectors indexed, {} skipped (dimension mismatch)",
+                indexed, skipped
+            );
+        } else {
+            info!("Built HNSW index with {} vectors", indexed);
+        }
         Ok(())
     }
 

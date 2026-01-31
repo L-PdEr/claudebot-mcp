@@ -129,11 +129,29 @@ echo ""
 echo "[9/10] Setting up systemd service..."
 scp "$LOCAL_PROJECT/deploy/claudebot-telegram.service" "$REMOTE_USER@$REMOTE_HOST:~/.config/systemd/user/"
 
-# Check if env file exists, if not copy template
+# Check and configure env file
 ssh "$REMOTE_USER@$REMOTE_HOST" << 'ENDSSH'
 if [ ! -f ~/.env.claudebot ]; then
     echo "WARNING: ~/.env.claudebot not found!"
     echo "Please create it with your TELEGRAM_BOT_TOKEN and ANTHROPIC_API_KEY"
+else
+    # Ensure Ollama config exists (add if missing)
+    if ! grep -q "OLLAMA_URL" ~/.env.claudebot; then
+        echo "" >> ~/.env.claudebot
+        echo "# Ollama/Llama Configuration" >> ~/.env.claudebot
+        echo "OLLAMA_URL=http://localhost:11434" >> ~/.env.claudebot
+        echo "LLAMA_MODEL=llama3.2:latest" >> ~/.env.claudebot
+        echo "EMBEDDING_MODEL=mxbai-embed-large:latest" >> ~/.env.claudebot
+        echo "  Added Ollama configuration to ~/.env.claudebot"
+    fi
+
+    # Ensure embedding model is correct (mxbai-embed-large for 1024-dim)
+    if grep -q "EMBEDDING_MODEL=nomic-embed-text" ~/.env.claudebot; then
+        sed -i 's/EMBEDDING_MODEL=nomic-embed-text.*/EMBEDDING_MODEL=mxbai-embed-large:latest/' ~/.env.claudebot
+        echo "  Fixed EMBEDDING_MODEL to mxbai-embed-large (1024-dim)"
+    fi
+
+    echo "  ✓ Env file configured"
 fi
 ENDSSH
 echo "✓ Systemd service installed"
