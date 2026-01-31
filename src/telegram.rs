@@ -986,33 +986,18 @@ struct ClaudeResponse {
     session_id: Option<String>,
 }
 
-/// Timeout configuration for Claude CLI execution
+/// Process monitoring for Claude CLI execution
 ///
-/// Strategy: NO hard timeout - only silence detection.
-/// Work continues as long as Claude produces output.
-/// Only kills process if no output for SILENCE_TIMEOUT_SECS.
+/// Strategy: NO TIMEOUT - only process health monitoring.
+/// Claude runs until it completes or crashes. We never kill a working process.
 ///
-/// Environment variables:
-/// - CLAUDE_SILENCE_TIMEOUT_SECS: Kill after N seconds of no output (default: 600)
-/// - CLAUDE_SILENCE_WARNING_SECS: Warn after N seconds of no output (default: 120)
+/// We only:
+/// 1. Log periodic status updates (so you know it's still working)
+/// 2. Detect when process actually exits (success or crash)
+/// 3. Report the result
 ///
-/// For long planning/coding tasks, increase CLAUDE_SILENCE_TIMEOUT_SECS to 1800+ (30 min)
-fn get_silence_timeout_secs() -> u64 {
-    std::env::var("CLAUDE_SILENCE_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(600) // Default: 10 minutes (was 3 min - too short for complex tasks)
-}
-
-fn get_silence_warning_secs() -> u64 {
-    std::env::var("CLAUDE_SILENCE_WARNING_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(120) // Default: 2 minutes
-}
-
-const STATUS_UPDATE_INTERVAL_SECS: u64 = 60; // Send status update every minute
-const THINKING_UPDATE_INTERVAL_SECS: u64 = 90; // Send "thinking" indicator every 90 sec
+/// This allows arbitrarily long tasks (hours of planning/coding).
+const STATUS_UPDATE_INTERVAL_SECS: u64 = 60; // Log "still working" every minute
 
 /// Invoke Claude Code CLI with JSON output for usage tracking
 /// Includes silence detection and total timeout handling
@@ -1074,87 +1059,28 @@ async fn invoke_claude_cli(prompt: &str, working_dir: &PathBuf, autonomous: bool
     let mut all_stdout = String::new();
     let mut all_stderr = String::new();
     let mut last_output_time = Instant::now();
-    let mut silence_warned = false;
 
     // Set up readers
     let mut stdout_reader = stdout.map(|s| BufReader::new(s).lines());
     let mut stderr_reader = stderr.map(|s| BufReader::new(s).lines());
 
     let mut last_status_update = Instant::now();
-    let mut last_thinking_update = Instant::now();
 
-    // Get configurable timeout values
-    let silence_timeout_secs = get_silence_timeout_secs();
-    let silence_warning_secs = get_silence_warning_secs();
+    tracing::info!("Claude CLI started - NO TIMEOUT, will run until completion");
 
-    tracing::info!(
-        "Claude CLI timeout config: warning={}s, timeout={}s",
-        silence_warning_secs,
-        silence_timeout_secs
-    );
-
-    // Monitor output - NO hard timeout, only silence detection
-    // Work continues as long as Claude produces output
+    // Monitor output - NO TIMEOUT
+    // Process runs until it completes or crashes. We never kill a working process.
     loop {
         let elapsed = start.elapsed();
-        let silence_duration = last_output_time.elapsed();
 
-        // Check silence timeout (only way to timeout - no hard limit)
-        if silence_duration.as_secs() >= silence_timeout_secs {
-            tracing::warn!(
-                "Claude CLI silence timeout after {} seconds of no output (total runtime: {:?})",
-                silence_duration.as_secs(),
-                elapsed
-            );
-            let _ = child.kill().await;
-            let total_duration = start.elapsed();
-
-            // Include partial output in error - work is not completely lost
-            let partial_info = if !all_stdout.is_empty() {
-                format!("\n\nPartial output before silence ({} chars):\n{}",
-                    all_stdout.len(),
-                    all_stdout.chars().take(2000).collect::<String>())
-            } else {
-                String::new()
-            };
-
-            return Err(anyhow::anyhow!(
-                "Process stopped responding (no output for {} seconds, total runtime: {:?}).{}",
-                silence_timeout_secs,
-                total_duration,
-                partial_info
-            ));
-        }
-
-        // Silence warning (but don't stop - just log)
-        if silence_duration.as_secs() >= silence_warning_secs && !silence_warned {
-            tracing::warn!(
-                "Claude CLI silent for {} seconds (will timeout at {} seconds)",
-                silence_duration.as_secs(),
-                silence_timeout_secs
-            );
-            silence_warned = true;
-        }
-
-        // Log thinking indicator for very long silences (helps with debugging)
-        if silence_duration.as_secs() >= THINKING_UPDATE_INTERVAL_SECS
-            && last_thinking_update.elapsed().as_secs() >= THINKING_UPDATE_INTERVAL_SECS
-        {
-            tracing::info!(
-                "Claude still thinking... (silent for {}s, timeout at {}s, total runtime: {:?})",
-                silence_duration.as_secs(),
-                silence_timeout_secs,
-                elapsed
-            );
-            last_thinking_update = Instant::now();
-        }
-
-        // Log periodic status for long-running tasks
+        // Log periodic status so user knows it's still working
         if last_status_update.elapsed().as_secs() >= STATUS_UPDATE_INTERVAL_SECS {
+            let silence_secs = last_output_time.elapsed().as_secs();
             tracing::info!(
-                "Claude CLI still running: {:?} elapsed, {} bytes output",
+                "Claude CLI still working: {:?} elapsed, {} bytes output, {}s since last output",
                 elapsed,
-                all_stdout.len()
+                all_stdout.len(),
+                silence_secs
             );
             last_status_update = Instant::now();
         }
@@ -1175,7 +1101,6 @@ async fn invoke_claude_cli(prompt: &str, working_dir: &PathBuf, autonomous: bool
                         all_stdout.push_str(&line);
                         all_stdout.push('\n');
                         last_output_time = Instant::now();
-                        silence_warned = false;
                         tracing::trace!("stdout: {}", &line[..line.len().min(100)]);
                     }
                     Ok(None) => {
@@ -1202,7 +1127,6 @@ async fn invoke_claude_cli(prompt: &str, working_dir: &PathBuf, autonomous: bool
                         all_stderr.push_str(&line);
                         all_stderr.push('\n');
                         last_output_time = Instant::now();
-                        silence_warned = false;
                         tracing::trace!("stderr: {}", &line[..line.len().min(100)]);
                     }
                     Ok(None) => {
