@@ -148,7 +148,7 @@ async fn static_handler(axum::extract::Path(path): axum::extract::Path<String>) 
                 .header(header::CONTENT_TYPE, mime)
                 .header(header::CACHE_CONTROL, "public, max-age=3600")
                 .body(Body::from(content.data.into_owned()))
-                .unwrap()
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
         None => StatusCode::NOT_FOUND.into_response(),
     }
