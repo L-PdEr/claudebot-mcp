@@ -516,6 +516,64 @@ impl GraphStore {
         Ok(())
     }
 
+    /// Find entity by exact name match
+    pub fn find_entity_by_name(&self, name: &str) -> Result<Option<Entity>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, entity_type, name, attributes, created_at
+            FROM entities
+            WHERE LOWER(name) = LOWER(?1)
+            LIMIT 1
+            "#,
+        )?;
+
+        let result = stmt
+            .query_row(params![name], |row| {
+                Ok(Entity {
+                    id: row.get(0)?,
+                    entity_type: row.get(1)?,
+                    name: row.get(2)?,
+                    attributes: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
+                    created_at: row.get(4)?,
+                })
+            })
+            .ok();
+
+        Ok(result)
+    }
+
+    /// Get all relations for an entity
+    pub fn get_relations_for_entity(&self, entity_id: &str) -> Result<Vec<Relation>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, source_id, target_id, relation_type, weight,
+                   valid_from, valid_until, evidence_count
+            FROM relations
+            WHERE source_id = ?1 OR target_id = ?1
+            ORDER BY weight DESC
+            LIMIT 20
+            "#,
+        )?;
+
+        let results = stmt
+            .query_map(params![entity_id], |row| {
+                Ok(Relation {
+                    id: row.get(0)?,
+                    source_id: row.get(1)?,
+                    target_id: row.get(2)?,
+                    relation_type: row.get(3)?,
+                    weight: row.get(4)?,
+                    valid_from: row.get(5)?,
+                    valid_until: row.get(6)?,
+                    evidence_count: row.get(7)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(results)
+    }
+
     /// Get graph statistics
     pub fn stats(&self) -> Result<GraphStats> {
         let entity_count: i64 = self

@@ -28,6 +28,7 @@
 //! ```
 
 pub mod auto_review;
+pub mod autonomous;
 pub mod bridge;
 pub mod cache;
 pub mod circle;
@@ -86,4 +87,11 @@ pub use telegram_ui::{
     ConversationContext, ContextParser, Intent, Suggestion,
     task_progress_keyboard, confirmation_keyboard, options_keyboard,
     suggest_next_actions, html_escape, format_progress_bar,
+};
+pub use autonomous::{
+    AutonomousLearner, LearnedFact, LearningConfig,
+    ContextManager, EnrichedContext, ContextConfig,
+    BackgroundProcessor, BackgroundConfig, BackgroundTask,
+    GoalTracker, Goal, GoalStatus,
+    FeedbackLoop, FeedbackSignal, MemoryFeedback,
 };

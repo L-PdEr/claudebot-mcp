@@ -662,8 +662,13 @@ struct ClaudeResponse {
 }
 
 /// Timeout configuration for Claude CLI execution
-const SILENCE_WARNING_SECS: u64 = 30;
-const TOTAL_TIMEOUT_SECS: u64 = 300; // 5 minutes
+///
+/// Strategy: NO hard timeout - only silence detection.
+/// Work continues as long as Claude produces output.
+/// Only kills process if no output for SILENCE_TIMEOUT_SECS.
+const SILENCE_WARNING_SECS: u64 = 60;      // Warn after 1 min silence
+const SILENCE_TIMEOUT_SECS: u64 = 180;     // Kill after 3 min silence (no activity)
+const STATUS_UPDATE_INTERVAL_SECS: u64 = 60; // Send status update every minute
 
 /// Invoke Claude Code CLI with JSON output for usage tracking
 /// Includes silence detection and total timeout handling
@@ -731,27 +736,59 @@ async fn invoke_claude_cli(prompt: &str, working_dir: &PathBuf, autonomous: bool
     let mut stdout_reader = stdout.map(|s| BufReader::new(s).lines());
     let mut stderr_reader = stderr.map(|s| BufReader::new(s).lines());
 
-    // Monitor output with timeout
+    let mut last_status_update = Instant::now();
+
+    // Monitor output - NO hard timeout, only silence detection
+    // Work continues as long as Claude produces output
     loop {
         let elapsed = start.elapsed();
+        let silence_duration = last_output_time.elapsed();
 
-        // Check total timeout
-        if elapsed.as_secs() >= TOTAL_TIMEOUT_SECS {
-            tracing::warn!("Claude CLI total timeout ({} seconds)", TOTAL_TIMEOUT_SECS);
+        // Check silence timeout (only way to timeout - no hard limit)
+        if silence_duration.as_secs() >= SILENCE_TIMEOUT_SECS {
+            tracing::warn!(
+                "Claude CLI silence timeout after {} seconds of no output (total runtime: {:?})",
+                silence_duration.as_secs(),
+                elapsed
+            );
             let _ = child.kill().await;
-            let duration = start.elapsed();
+            let total_duration = start.elapsed();
+
+            // Include partial output in error - work is not completely lost
+            let partial_info = if !all_stdout.is_empty() {
+                format!("\n\nPartial output before silence ({} chars):\n{}",
+                    all_stdout.len(),
+                    all_stdout.chars().take(2000).collect::<String>())
+            } else {
+                String::new()
+            };
+
             return Err(anyhow::anyhow!(
-                "{}",
-                TaskFeedback::format_timeout(duration, Some(&all_stdout))
+                "Process stopped responding (no output for {} seconds, total runtime: {:?}).{}",
+                SILENCE_TIMEOUT_SECS,
+                total_duration,
+                partial_info
             ));
         }
 
-        // Check silence timeout
-        let silence_duration = last_output_time.elapsed();
+        // Silence warning (but don't stop - just log)
         if silence_duration.as_secs() >= SILENCE_WARNING_SECS && !silence_warned {
-            tracing::warn!("Claude CLI silent for {} seconds", silence_duration.as_secs());
+            tracing::warn!(
+                "Claude CLI silent for {} seconds (will timeout at {} seconds)",
+                silence_duration.as_secs(),
+                SILENCE_TIMEOUT_SECS
+            );
             silence_warned = true;
-            // Don't bail yet, just warn - the process might still be working
+        }
+
+        // Log periodic status for long-running tasks
+        if last_status_update.elapsed().as_secs() >= STATUS_UPDATE_INTERVAL_SECS {
+            tracing::info!(
+                "Claude CLI still running: {:?} elapsed, {} bytes output",
+                elapsed,
+                all_stdout.len()
+            );
+            last_status_update = Instant::now();
         }
 
         // Use select to read from stdout/stderr with timeout
