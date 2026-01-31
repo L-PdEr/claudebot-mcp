@@ -32,6 +32,7 @@ use tokio::sync::RwLock;
 
 use crate::agent::{
     PlanningEngine, ReflectionEngine, Scheduler, ToolRegistry, AgentOrchestrator,
+    Reminder, Plan, ApprovalState,
 };
 use crate::autonomous::{
     AutonomousLearner, BackgroundProcessor, ContextManager, GoalTracker, FeedbackLoop,
@@ -255,8 +256,11 @@ pub async fn run_telegram_bot() -> Result<()> {
         scheduler,
         tool_registry: RwLock::new(tool_registry),
         agent_orchestrator,
+        // Phase 9: Security hardening - 20 requests per minute per user
+        rate_limiter: RateLimiter::new(20, 60),
     });
     tracing::info!("Autonomous behavior system initialized");
+    tracing::info!("Rate limiter: 20 req/min per user");
     tracing::info!("Goals database: {:?}", goals_db_path);
 
     // Start the scheduler background loop
@@ -691,6 +695,80 @@ async fn callback_handler(
                 .text("Permission request expired or not found")
                 .await?;
         }
+    } else if callback_data.starts_with("plan_approve:") {
+        // Plan approval - mark plan as approved and notify user
+        let plan_id = callback_data.strip_prefix("plan_approve:").unwrap_or("");
+
+        if let Some(chat_id) = chat_id {
+            match data.planning_engine.process_approval(plan_id, "approve").await {
+                Ok(ApprovalState::Approved) => {
+                    bot.answer_callback_query(&query.id)
+                        .text("Plan approved!")
+                        .await?;
+
+                    // Update message
+                    if let Some(msg) = &query.message {
+                        let _ = bot.edit_message_text(
+                            chat_id,
+                            msg.id(),
+                            "✅ Plan Approved\n\nReady to execute. Send the task description to begin execution."
+                        ).await;
+                    }
+
+                    // Clear pending plan from context
+                    data.update_ui_context(chat_id.0, |ctx| {
+                        ctx.pending_plan_id = None;
+                    }).await;
+                }
+                Ok(_) => {
+                    bot.answer_callback_query(&query.id)
+                        .text("Plan state updated")
+                        .await?;
+                }
+                Err(e) => {
+                    bot.answer_callback_query(&query.id)
+                        .text(&format!("Error: {}", e))
+                        .await?;
+                }
+            }
+        }
+    } else if callback_data.starts_with("plan_reject:") {
+        // Plan rejection - mark plan as rejected
+        let plan_id = callback_data.strip_prefix("plan_reject:").unwrap_or("");
+
+        if let Some(chat_id) = chat_id {
+            match data.planning_engine.process_approval(plan_id, "reject").await {
+                Ok(ApprovalState::Rejected) => {
+                    bot.answer_callback_query(&query.id)
+                        .text("Plan rejected")
+                        .await?;
+
+                    // Update message
+                    if let Some(msg) = &query.message {
+                        let _ = bot.edit_message_text(
+                            chat_id,
+                            msg.id(),
+                            "❌ Plan Rejected\n\nCreate a new plan with /plan <task>"
+                        ).await;
+                    }
+
+                    // Clear pending plan from context
+                    data.update_ui_context(chat_id.0, |ctx| {
+                        ctx.pending_plan_id = None;
+                    }).await;
+                }
+                Ok(_) => {
+                    bot.answer_callback_query(&query.id)
+                        .text("Plan state updated")
+                        .await?;
+                }
+                Err(e) => {
+                    bot.answer_callback_query(&query.id)
+                        .text(&format!("Error: {}", e))
+                        .await?;
+                }
+            }
+        }
     } else {
         bot.answer_callback_query(&query.id).await?;
     }
@@ -730,6 +808,74 @@ struct BotData {
     scheduler: Scheduler,
     tool_registry: RwLock<ToolRegistry>,
     agent_orchestrator: AgentOrchestrator,
+    // Phase 9: Security hardening (T3.3)
+    rate_limiter: RateLimiter,
+}
+
+/// Per-user rate limiting for Telegram requests
+struct RateLimiter {
+    /// Max requests per window
+    max_requests: u32,
+    /// Window duration in seconds
+    window_secs: u64,
+    /// Per-user request counts: user_id -> (window_start, count)
+    entries: RwLock<HashMap<i64, RateLimitEntry>>,
+}
+
+struct RateLimitEntry {
+    window_start: Instant,
+    count: u32,
+}
+
+impl RateLimiter {
+    fn new(max_requests: u32, window_secs: u64) -> Self {
+        Self {
+            max_requests,
+            window_secs,
+            entries: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Check if user is within rate limit. Returns true if allowed.
+    async fn check(&self, user_id: i64) -> bool {
+        let mut entries = self.entries.write().await;
+        let now = Instant::now();
+        let window = Duration::from_secs(self.window_secs);
+
+        let entry = entries.entry(user_id).or_insert(RateLimitEntry {
+            window_start: now,
+            count: 0,
+        });
+
+        // Reset window if expired
+        if now.duration_since(entry.window_start) >= window {
+            entry.window_start = now;
+            entry.count = 0;
+        }
+
+        // Check limit
+        if entry.count >= self.max_requests {
+            return false;
+        }
+
+        entry.count += 1;
+        true
+    }
+
+    /// Get remaining requests for user
+    async fn remaining(&self, user_id: i64) -> u32 {
+        let entries = self.entries.read().await;
+        if let Some(entry) = entries.get(&user_id) {
+            let now = Instant::now();
+            let window = Duration::from_secs(self.window_secs);
+            if now.duration_since(entry.window_start) >= window {
+                return self.max_requests;
+            }
+            self.max_requests.saturating_sub(entry.count)
+        } else {
+            self.max_requests
+        }
+    }
 }
 
 /// Pending permission request waiting for user approval
@@ -1093,6 +1239,19 @@ async fn handle_message(bot: Bot, msg: Message, data: Arc<BotData>) -> Result<()
     if !data.is_allowed(user_id) {
         tracing::warn!("Unauthorized user: {}", user_id);
         bot.send_message(chat_id, "Unauthorized.").await?;
+        return Ok(());
+    }
+
+    // Rate limiting check (T3.3 - Security Hardening)
+    if !data.rate_limiter.check(user_id).await {
+        let remaining = data.rate_limiter.remaining(user_id).await;
+        tracing::warn!("Rate limit exceeded for user {}", user_id);
+        bot.send_message(chat_id, format!(
+            "⚠️ Rate limit exceeded.\n\
+            Please wait a moment before sending more requests.\n\
+            Remaining: {}/min",
+            remaining
+        )).await?;
         return Ok(());
     }
 
@@ -1701,6 +1860,9 @@ async fn handle_command(
                 /stats - System statistics\n\
                 /status - Check bot status\n\
                 /preflight [cmd] - Check tool availability\n\n\
+                Planning & Scheduling:\n\
+                /plan <task> - Create execution plan\n\
+                /remind <time> <msg> - Set reminder\n\n\
                 Permissions:\n\
                 /interactive - Toggle pre-approval mode\n\
                   → Shows Run/Stop buttons before executing\n\
@@ -2201,6 +2363,135 @@ async fn handle_command(
             bot.send_message(chat_id, msg).await?;
         }
 
+        // Phase 8: Planning commands
+        "/plan" => {
+            if args.is_empty() {
+                bot.send_message(chat_id,
+                    "📋 Planning Mode\n\n\
+                    Create a plan for complex tasks with approval workflow.\n\n\
+                    Usage: /plan <task description>\n\
+                    Example: /plan Refactor the auth system to use JWT\n\n\
+                    The plan will be decomposed into steps for your approval."
+                ).await?;
+            } else {
+                bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await?;
+
+                // Check if Llama is available for plan generation
+                if !data.llama_worker.is_available().await {
+                    bot.send_message(chat_id,
+                        "⚠️ Planning requires local LLM (Ollama).\n\
+                        Start Ollama with: ollama serve"
+                    ).await?;
+                    return Ok(());
+                }
+
+                // Create plan using PlanningEngine
+                match data.planning_engine.create_plan(args, &data.llama_worker).await {
+                    Ok(plan) => {
+                        let plan_id = plan.id.clone();
+                        let plan_display = format_plan_for_display(&plan);
+
+                        // Store plan for later approval
+                        data.planning_engine.store_plan(plan).await;
+
+                        // Store plan ID in context for approval
+                        data.update_ui_context(chat_id.0, |ctx| {
+                            ctx.pending_plan_id = Some(plan_id.clone());
+                        }).await;
+
+                        // Create approval keyboard
+                        let keyboard = teloxide::types::InlineKeyboardMarkup::new(vec![
+                            vec![
+                                teloxide::types::InlineKeyboardButton::callback(
+                                    "✅ Approve",
+                                    format!("plan_approve:{}", plan_id)
+                                ),
+                                teloxide::types::InlineKeyboardButton::callback(
+                                    "❌ Reject",
+                                    format!("plan_reject:{}", plan_id)
+                                ),
+                            ],
+                        ]);
+
+                        bot.send_message(chat_id, plan_display)
+                            .reply_markup(keyboard)
+                            .await?;
+                    }
+                    Err(e) => {
+                        bot.send_message(chat_id, format!("Failed to create plan: {}", e)).await?;
+                    }
+                }
+            }
+        }
+
+        // Phase 8: Reminder commands
+        "/remind" | "/reminder" => {
+            if args.is_empty() {
+                // Show current reminders
+                let reminders = data.scheduler.get_user_reminders(user_id).await;
+                if reminders.is_empty() {
+                    bot.send_message(chat_id,
+                        "⏰ Reminders\n\n\
+                        No active reminders.\n\n\
+                        Usage: /remind <time> <message>\n\
+                        Examples:\n\
+                        • /remind 30m Check build status\n\
+                        • /remind 2h Review PR feedback\n\
+                        • /remind 1d Weekly standup prep"
+                    ).await?;
+                } else {
+                    let mut msg = "⏰ Active Reminders\n\n".to_string();
+                    for reminder in reminders {
+                        msg.push_str(&format!("• {}\n", reminder.format()));
+                    }
+                    msg.push_str("\nUse /remind <time> <message> to add more.");
+                    bot.send_message(chat_id, msg).await?;
+                }
+            } else {
+                // Parse: /remind 30m Check the build
+                let parts: Vec<&str> = args.splitn(2, ' ').collect();
+                if parts.len() < 2 {
+                    bot.send_message(chat_id, "Usage: /remind <time> <message>\nExample: /remind 30m Check build").await?;
+                    return Ok(());
+                }
+
+                let time_str = parts[0];
+                let message = parts[1];
+
+                // Parse duration
+                let duration = match parse_duration(time_str) {
+                    Some(d) => d,
+                    None => {
+                        bot.send_message(chat_id,
+                            "Invalid time format. Use:\n\
+                            • 30s, 5m, 2h, 1d\n\
+                            • Examples: 30m, 2h, 1d"
+                        ).await?;
+                        return Ok(());
+                    }
+                };
+
+                let due_at = chrono::Utc::now().timestamp() + duration.as_secs() as i64;
+                let reminder = Reminder::once(user_id, chat_id.0, message, due_at);
+                let reminder_id = data.scheduler.schedule_reminder(reminder).await;
+
+                let due_time = chrono::DateTime::from_timestamp(due_at, 0)
+                    .map(|dt| dt.format("%H:%M:%S").to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                bot.send_message(chat_id, format!(
+                    "⏰ Reminder set!\n\n\
+                    Message: {}\n\
+                    Due: {} (in {})\n\
+                    ID: {}",
+                    message,
+                    due_time,
+                    format_duration(duration),
+                    &reminder_id[..8]
+                )).await?;
+            }
+        }
+
         _ => {
             // Check limits before processing
             if let Err(msg) = check_user_limits(data, user_id) {
@@ -2648,6 +2939,15 @@ fn learn_fact(data: &BotData, fact: &str, user_id: i64) -> String {
 
 #[allow(dead_code)]
 async fn learn_fact_async(data: &BotData, fact: &str, user_id: i64) -> String {
+    // T3.3 Security: Skip storing sensitive data as facts
+    if contains_sensitive_data(fact) {
+        tracing::info!("Skipping fact storage: contains sensitive data");
+        return "Skipped: contains sensitive data".to_string();
+    }
+
+    // Sanitize fact before storage
+    let sanitized_fact = sanitize_for_storage(fact);
+
     // Get embedder outside the lock
     let embedder = {
         let store = data.memory_store.lock().unwrap();
@@ -2655,28 +2955,28 @@ async fn learn_fact_async(data: &BotData, fact: &str, user_id: i64) -> String {
     };
 
     // Determine category from content
-    let category = categorize_fact(fact);
+    let category = categorize_fact(&sanitized_fact);
     let source = format!("telegram_user_{}", user_id);
 
     // Compute embedding outside the lock (async)
     let embedding = if let Some(embedder) = embedder {
-        embedder.read().await.embed(fact).await.ok()
+        embedder.read().await.embed(&sanitized_fact).await.ok()
     } else {
         None
     };
 
     // Store the fact with embedding
     let store = data.memory_store.lock().unwrap();
-    let result = store.learn(fact, &category, &source, 0.9);
+    let result = store.learn(&sanitized_fact, &category, &source, 0.9);
 
     match result {
         Ok(id) => {
             // Store embedding if we have one
-            if let Some(ref emb) = embedding {
-                let _ = store.store_embedding(&id, emb);
+            if let Some(ref _emb) = embedding {
+                let _ = store.store_embedding(&id, _emb);
             }
             let with_emb = if embedding.is_some() { " (with embedding)" } else { "" };
-            format!("Learned [{}]: {}{}\n(ID: {})", category, truncate(fact, 50), with_emb, &id[..8])
+            format!("Learned [{}]: {}{}\n(ID: {})", category, truncate(&sanitized_fact, 50), with_emb, &id[..8])
         }
         Err(e) => format!("Failed to learn: {}", e),
     }
@@ -2942,6 +3242,16 @@ fn get_conversation_context(data: &BotData, chat_id: i64) -> String {
 
 /// Store a conversation exchange (user message + assistant response)
 fn store_conversation_exchange(data: &BotData, chat_id: i64, user_msg: &str, assistant_msg: &str) {
+    // T3.3 Security: Check for sensitive data before storage
+    if contains_sensitive_data(user_msg) || contains_sensitive_data(assistant_msg) {
+        tracing::info!("Skipping conversation storage: contains sensitive data");
+        return;
+    }
+
+    // Sanitize before storage
+    let sanitized_user = sanitize_for_storage(user_msg);
+    let sanitized_assistant = sanitize_for_storage(assistant_msg);
+
     let store = match data.conversation_store.lock() {
         Ok(s) => s,
         Err(e) => {
@@ -2950,7 +3260,7 @@ fn store_conversation_exchange(data: &BotData, chat_id: i64, user_msg: &str, ass
         }
     };
 
-    if let Err(e) = store.add_exchange(chat_id, user_msg, assistant_msg) {
+    if let Err(e) = store.add_exchange(chat_id, &sanitized_user, &sanitized_assistant) {
         tracing::error!("Failed to store conversation: {}", e);
     }
 }
@@ -3201,14 +3511,16 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// Parse duration string like "30m", "2h", "1d"
+/// Parse duration string like "30s", "30m", "2h", "1d"
 fn parse_duration(s: &str) -> Option<std::time::Duration> {
     let s = s.trim().to_lowercase();
     if s.is_empty() {
         return None;
     }
 
-    let (num_str, unit) = if s.ends_with('m') {
+    let (num_str, unit) = if s.ends_with('s') {
+        (&s[..s.len()-1], 's')
+    } else if s.ends_with('m') {
         (&s[..s.len()-1], 'm')
     } else if s.ends_with('h') {
         (&s[..s.len()-1], 'h')
@@ -3222,6 +3534,7 @@ fn parse_duration(s: &str) -> Option<std::time::Duration> {
     let num: u64 = num_str.parse().ok()?;
 
     let secs = match unit {
+        's' => num,
         'm' => num * 60,
         'h' => num * 3600,
         'd' => num * 86400,
@@ -3229,6 +3542,124 @@ fn parse_duration(s: &str) -> Option<std::time::Duration> {
     };
 
     Some(std::time::Duration::from_secs(secs))
+}
+
+/// Format duration for human display
+fn format_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
+        if mins > 0 {
+            format!("{}h {}m", hours, mins)
+        } else {
+            format!("{}h", hours)
+        }
+    } else {
+        let days = secs / 86400;
+        let hours = (secs % 86400) / 3600;
+        if hours > 0 {
+            format!("{}d {}h", days, hours)
+        } else {
+            format!("{}d", days)
+        }
+    }
+}
+
+/// Format a Plan for display to user
+fn format_plan_for_display(plan: &Plan) -> String {
+    let mut msg = format!("📋 *{}*\n\n", plan.title);
+    msg.push_str(&format!("{}\n\n", plan.description));
+    msg.push_str("*Steps:*\n");
+
+    for step in &plan.steps {
+        let complexity_bar = "█".repeat(step.complexity as usize / 2);
+        let complexity_empty = "░".repeat(5 - step.complexity as usize / 2);
+        msg.push_str(&format!(
+            "{}. {} [{}{}]\n   {}\n\n",
+            step.number,
+            step.title,
+            complexity_bar,
+            complexity_empty,
+            step.description
+        ));
+    }
+
+    msg.push_str("\n*Reply with:* Approve / Reject");
+    msg
+}
+
+/// Detect sensitive data that should not be cached/logged (T3.3 Security)
+/// Returns true if the text contains potentially sensitive information
+fn contains_sensitive_data(text: &str) -> bool {
+    let lower = text.to_lowercase();
+
+    // API keys and tokens (common patterns)
+    let api_key_patterns = [
+        "sk-", "pk-", "api_key", "apikey", "api-key",
+        "secret_key", "secretkey", "secret-key",
+        "access_token", "accesstoken", "bearer ",
+        "authorization:", "x-api-key",
+    ];
+
+    for pattern in api_key_patterns {
+        if lower.contains(pattern) {
+            return true;
+        }
+    }
+
+    // Password-like content
+    if lower.contains("password") && (lower.contains("=") || lower.contains(":")) {
+        return true;
+    }
+
+    // Private keys
+    if text.contains("-----BEGIN") && (text.contains("PRIVATE KEY") || text.contains("RSA")) {
+        return true;
+    }
+
+    // AWS credentials
+    if lower.contains("aws_access_key") || lower.contains("aws_secret") {
+        return true;
+    }
+
+    // Database connection strings
+    if lower.contains("postgres://") || lower.contains("mysql://") || lower.contains("mongodb://") {
+        if lower.contains("@") { // Contains credentials
+            return true;
+        }
+    }
+
+    // Environment variable assignments with secrets
+    if (lower.contains("export ") || lower.contains("env ")) &&
+       (lower.contains("key=") || lower.contains("secret=") || lower.contains("token=")) {
+        return true;
+    }
+
+    false
+}
+
+/// Sanitize text for safe storage/logging by redacting sensitive patterns
+fn sanitize_for_storage(text: &str) -> String {
+    let mut result = text.to_string();
+
+    // Redact API keys (sk-xxx... → sk-[REDACTED])
+    let api_key_re = regex::Regex::new(r"(sk-|pk-)[a-zA-Z0-9]{10,}").unwrap();
+    result = api_key_re.replace_all(&result, "$1[REDACTED]").to_string();
+
+    // Redact bearer tokens
+    let bearer_re = regex::Regex::new(r"(?i)(bearer\s+)[a-zA-Z0-9._-]+").unwrap();
+    result = bearer_re.replace_all(&result, "$1[REDACTED]").to_string();
+
+    // Redact passwords in URLs
+    let url_pass_re = regex::Regex::new(r"(://[^:]+:)[^@]+(@)").unwrap();
+    result = url_pass_re.replace_all(&result, "$1[REDACTED]$2").to_string();
+
+    result
 }
 
 async fn handle_document(

@@ -322,6 +322,7 @@ pub struct ConversationContext {
     pub last_diff: Option<String>,
     pub last_mentioned_files: Vec<String>,
     pub pending_confirmation: Option<String>,
+    pub pending_plan_id: Option<String>,
 }
 
 impl ConversationContext {
