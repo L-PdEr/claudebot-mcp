@@ -101,6 +101,20 @@ impl ToolSchema {
         self
     }
 
+    /// Add an object parameter
+    pub fn with_object_param(mut self, name: &str, description: &str, required: bool) -> Self {
+        if let Some(props) = self.parameters.get_mut("properties") {
+            props[name] = serde_json::json!({
+                "type": "object",
+                "description": description
+            });
+        }
+        if required {
+            self.required.push(name.to_string());
+        }
+        self
+    }
+
     /// Validate parameters against schema
     pub fn validate(&self, params: &Value) -> Result<()> {
         // Check required parameters

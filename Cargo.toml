@@ -76,6 +76,12 @@ dirs = "5"
 # Git operations (native)
 git2 = "0.19"
 
+# Async traits
+async-trait = "0.1"
+
+# TOML parsing (for skills)
+toml = "0.8"
+
 [build-dependencies]
 tonic-build = "0.12"
 
