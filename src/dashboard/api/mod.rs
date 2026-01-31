@@ -2,14 +2,29 @@
 //!
 //! REST API for dashboard functionality.
 
+pub mod config;
 pub mod health;
+pub mod logs;
+pub mod network;
+pub mod skills;
 pub mod status;
 pub mod stream;
+pub mod users;
 
 use axum::{routing::get, Router};
 use std::sync::Arc;
 
+pub use config::{
+    config_router, ConfigApiState, ConfigBackup, ConfigFieldResponse, ConfigFieldSchema,
+    ConfigResponse, ConfigSource, ConfigValue, FieldSensitivity, FieldType, ReloadBehavior,
+    SchemaResponse, UpdateConfigRequest, UpdateConfigResponse, ValidateConfigRequest,
+    ValidateConfigResponse, ValidationRules,
+};
 pub use health::health_router;
+pub use skills::{
+    skills_router, InstallSkillRequest, InstallSkillResponse, SkillApiState, SkillDetailResponse,
+    SkillErrorResponse, SkillListItem, SkillListQuery, SkillListResponse, UpdateSkillRequest,
+};
 pub use status::{
     conversations_handler, metrics_handler, status_handler, ApiStatus, BotStatus,
     ConversationItem, ConversationsResponse, ErrorResponse, MetricsResponse, PaginationParams,
@@ -18,6 +33,17 @@ pub use status::{
 pub use stream::{
     stream_logs, stream_messages, stream_metrics, stream_router, HeartbeatEvent, LogEvent,
     LogLevel, MessageEvent, MetricsEvent, StreamState,
+};
+pub use users::{
+    users_router, TelegramUser, TelegramUserRole, UpdateUserRequest, UserApiState, UserDetail,
+    UserExport, UserListItem, UserListQuery, UserListResponse, UserStats,
+};
+pub use logs::{
+    logs_router, LogApiState, LogComponent, LogEntry, LogFilter, LogHistoryResponse, LogStats,
+    LogLevel as EnhancedLogLevel,
+};
+pub use network::{
+    network_router, NetworkApiState, NetworkStatus, TailscaleStatus,
 };
 
 /// Combined dashboard API state

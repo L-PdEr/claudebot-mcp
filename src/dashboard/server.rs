@@ -1,8 +1,12 @@
 //! Dashboard HTTP Server
 //!
-//! Axum-based server with embedded static files, CORS, and graceful shutdown.
+//! Axum-based server with embedded static files, CORS, authentication, and graceful shutdown.
 
-use crate::dashboard::api::{health_router, health::AppState};
+use crate::dashboard::api::{
+    config_router, health::AppState, health_router, logs_router, network_router, skills_router,
+    users_router, ConfigApiState, LogApiState, NetworkApiState, SkillApiState, UserApiState,
+};
+use crate::dashboard::auth::{auth_router, AuthConfig, AuthState};
 use crate::dashboard::config::DashboardConfig;
 use axum::{
     body::Body,
@@ -27,20 +31,122 @@ struct StaticAssets;
 pub struct DashboardServer {
     config: DashboardConfig,
     state: Arc<AppState>,
+    auth_state: Arc<AuthState>,
+    skill_state: Arc<SkillApiState>,
+    config_state: Arc<ConfigApiState>,
+    user_state: Arc<UserApiState>,
+    log_state: Arc<LogApiState>,
+    network_state: Arc<NetworkApiState>,
 }
 
 impl DashboardServer {
     /// Create a new dashboard server with the given configuration
     pub fn new(config: DashboardConfig) -> Self {
+        // Auto-enable auth if not localhost
+        let auth_enabled = config.require_auth || !config.is_localhost();
+
+        let auth_config = AuthConfig {
+            enabled: auth_enabled,
+            ..AuthConfig::default()
+        };
+
+        let network_state = Arc::new(NetworkApiState::new(
+            config.bind_addr.to_string(),
+            config.port,
+        ));
+
         Self {
             config,
             state: Arc::new(AppState::new()),
+            auth_state: Arc::new(AuthState::new(auth_config)),
+            skill_state: Arc::new(SkillApiState::with_defaults()),
+            config_state: Arc::new(ConfigApiState::with_defaults()),
+            user_state: Arc::new(UserApiState::with_defaults()),
+            log_state: Arc::new(LogApiState::with_defaults()),
+            network_state,
         }
     }
 
     /// Create with default configuration
     pub fn with_defaults() -> Self {
         Self::new(DashboardConfig::default())
+    }
+
+    /// Create with custom auth state (for testing or pre-configured users)
+    pub fn with_auth(config: DashboardConfig, auth_state: Arc<AuthState>) -> Self {
+        let network_state = Arc::new(NetworkApiState::new(
+            config.bind_addr.to_string(),
+            config.port,
+        ));
+
+        Self {
+            config,
+            state: Arc::new(AppState::new()),
+            auth_state,
+            skill_state: Arc::new(SkillApiState::with_defaults()),
+            config_state: Arc::new(ConfigApiState::with_defaults()),
+            user_state: Arc::new(UserApiState::with_defaults()),
+            log_state: Arc::new(LogApiState::with_defaults()),
+            network_state,
+        }
+    }
+
+    /// Create with custom skill registry
+    pub fn with_skills(
+        config: DashboardConfig,
+        skill_state: Arc<SkillApiState>,
+    ) -> Self {
+        let auth_enabled = config.require_auth || !config.is_localhost();
+        let auth_config = AuthConfig {
+            enabled: auth_enabled,
+            ..AuthConfig::default()
+        };
+
+        let network_state = Arc::new(NetworkApiState::new(
+            config.bind_addr.to_string(),
+            config.port,
+        ));
+
+        Self {
+            config,
+            state: Arc::new(AppState::new()),
+            auth_state: Arc::new(AuthState::new(auth_config)),
+            skill_state,
+            config_state: Arc::new(ConfigApiState::with_defaults()),
+            user_state: Arc::new(UserApiState::with_defaults()),
+            log_state: Arc::new(LogApiState::with_defaults()),
+            network_state,
+        }
+    }
+
+    /// Get the auth state for user management
+    pub fn auth_state(&self) -> &Arc<AuthState> {
+        &self.auth_state
+    }
+
+    /// Get the skill state for skill management
+    pub fn skill_state(&self) -> &Arc<SkillApiState> {
+        &self.skill_state
+    }
+
+    /// Get the config state for configuration management
+    pub fn config_state(&self) -> &Arc<ConfigApiState> {
+        &self.config_state
+    }
+
+    /// Get the user state for Telegram user management
+    pub fn user_state(&self) -> &Arc<UserApiState> {
+        &self.user_state
+    }
+
+    /// Get the log state for log management
+    pub fn log_state(&self) -> &Arc<LogApiState> {
+        &self.log_state
+    }
+
+    /// Get the network state for network status
+    pub fn network_state(&self) -> &Arc<NetworkApiState> {
+        &self.network_state
     }
 
     /// Build the router with all routes and middleware
@@ -56,7 +162,8 @@ impl DashboardServer {
                         .collect::<Vec<_>>(),
                 )
                 .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
-                .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+                .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::COOKIE])
+                .allow_credentials(true)
         } else {
             CorsLayer::new()
                 .allow_origin(Any)
@@ -71,6 +178,18 @@ impl DashboardServer {
             .route("/{*path}", get(static_handler))
             // Health API (nested)
             .nest("/api", health_router(self.state.clone()))
+            // Authentication API
+            .nest("/api/auth", auth_router(self.auth_state.clone()))
+            // Skills API
+            .nest("/api/skills", skills_router(self.skill_state.clone()))
+            // Config API
+            .nest("/api/config", config_router(self.config_state.clone()))
+            // Logs API
+            .nest("/api/logs", logs_router(self.log_state.clone()))
+            // Network API
+            .nest("/api/network", network_router(self.network_state.clone()))
+            // Users API
+            .nest("/api/users", users_router(self.user_state.clone()))
             // Middleware
             .layer(cors);
 

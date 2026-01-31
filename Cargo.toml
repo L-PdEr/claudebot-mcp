@@ -73,6 +73,14 @@ base64 = "0.22"
 zeroize = { version = "1", features = ["derive"] }
 dirs = "5"
 
+# Authentication (Dashboard)
+argon2 = "0.5"
+jsonwebtoken = "9"
+tower_governor = "0.4"
+axum-extra = { version = "0.10", features = ["cookie", "typed-header"] }
+cookie = "0.18"
+parking_lot = "0.12"
+
 # Git operations (native)
 git2 = "0.19"
 
