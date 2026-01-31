@@ -98,29 +98,35 @@ echo "✓ Dependencies checked"
 ENDSSH
 echo "✓ Server dependencies installed"
 
+# Stop service before copying (binary may be in use)
+echo ""
+echo "[5/10] Stopping service for binary update..."
+ssh "$REMOTE_USER@$REMOTE_HOST" "systemctl --user stop claudebot-telegram.service 2>/dev/null || true; rm -f ~/bin/claudebot-mcp"
+echo "✓ Service stopped"
+
 # Copy binary
 echo ""
-echo "[5/9] Copying binary to server..."
+echo "[6/10] Copying binary to server..."
 scp "$LOCAL_PROJECT/target/release/claudebot-mcp" "$REMOTE_USER@$REMOTE_HOST:~/bin/"
 ssh "$REMOTE_USER@$REMOTE_HOST" "chmod +x ~/bin/claudebot-mcp"
 echo "✓ Binary deployed"
 
 # Copy workspace files (CLAUDE.md, etc.)
 echo ""
-echo "[6/9] Copying workspace files..."
+echo "[7/10] Copying workspace files..."
 rsync -av --progress "$LOCAL_PROJECT/workspace/" "$REMOTE_USER@$REMOTE_HOST:~/workspace/"
 echo "✓ Workspace files synced"
 
 # Copy Claude Code commands (circle, security, review skills)
 echo ""
-echo "[7/9] Copying Claude Code commands..."
+echo "[8/10] Copying Claude Code commands..."
 ssh "$REMOTE_USER@$REMOTE_HOST" "mkdir -p ~/workspace/.claude/commands"
 rsync -av --progress "$LOCAL_PROJECT/.claude/" "$REMOTE_USER@$REMOTE_HOST:~/workspace/.claude/"
 echo "✓ Claude Code commands synced (security, review, circle)"
 
 # Copy systemd service
 echo ""
-echo "[8/9] Setting up systemd service..."
+echo "[9/10] Setting up systemd service..."
 scp "$LOCAL_PROJECT/deploy/claudebot-telegram.service" "$REMOTE_USER@$REMOTE_HOST:~/.config/systemd/user/"
 
 # Check if env file exists, if not copy template
@@ -134,7 +140,7 @@ echo "✓ Systemd service installed"
 
 # Enable and start service
 echo ""
-echo "[9/9] Starting service..."
+echo "[10/10] Starting service..."
 ssh "$REMOTE_USER@$REMOTE_HOST" << 'ENDSSH'
 # Enable lingering for user services
 loginctl enable-linger eliot 2>/dev/null || true
