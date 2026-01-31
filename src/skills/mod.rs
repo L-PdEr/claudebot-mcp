@@ -34,13 +34,23 @@
 //! endpoint = "https://api.weather.com/v1/current"
 //! method = "GET"
 //! ```
+//!
+//! # Security
+//!
+//! Shell and script execution is sandboxed with:
+//! - Command allowlist/blocklist
+//! - Resource limits (timeout, memory, output size)
+//! - Environment sanitization
+//! - Pattern-based blocking for dangerous operations
 
 pub mod registry;
 pub mod generator;
 pub mod loader;
 pub mod types;
+pub mod sandbox;
 
 pub use registry::{SkillRegistry, InstalledSkill, SkillSource, SkillResult, SkillStats};
 pub use generator::{SkillGenerator, GeneratedSkill};
 pub use loader::SkillLoader;
 pub use types::{SkillDefinition, SkillParameter, ExecutionType, SkillMetadata};
+pub use sandbox::{SkillSandbox, SandboxConfig, SandboxResult, ValidationResult};

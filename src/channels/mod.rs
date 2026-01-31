@@ -13,8 +13,10 @@ pub mod traits;
 pub mod whatsapp;
 pub mod discord;
 pub mod webchat;
+pub mod rate_limit;
 
 pub use traits::{ChannelMessage, MessageType, ChannelError, ChannelResponse, ResponseButton, ParseMode};
+pub use rate_limit::{ChannelRateLimiter, RateLimitConfig, RateLimitResult, RateLimitStats};
 pub use whatsapp::{WhatsAppChannel, WhatsAppConfig};
 pub use discord::{DiscordChannel, DiscordConfig};
 pub use webchat::{WebChatChannel, WebChatConfig};

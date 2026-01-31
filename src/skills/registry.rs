@@ -4,13 +4,13 @@
 
 use super::types::*;
 use super::generator::GeneratedSkill;
+use super::sandbox::{SkillSandbox, SandboxConfig};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{info, warn};
 
 /// Installed skill with runtime metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +88,8 @@ pub struct SkillRegistry {
     skills_dir: PathBuf,
     /// HTTP client for skill execution
     client: reqwest::Client,
+    /// Sandbox for shell/script execution
+    sandbox: SkillSandbox,
 }
 
 impl SkillRegistry {
@@ -97,6 +99,17 @@ impl SkillRegistry {
             skills: RwLock::new(HashMap::new()),
             skills_dir,
             client: reqwest::Client::new(),
+            sandbox: SkillSandbox::default_sandbox(),
+        }
+    }
+
+    /// Create new registry with custom sandbox config
+    pub fn with_sandbox(skills_dir: PathBuf, sandbox_config: SandboxConfig) -> Self {
+        Self {
+            skills: RwLock::new(HashMap::new()),
+            skills_dir,
+            client: reqwest::Client::new(),
+            sandbox: SkillSandbox::new(sandbox_config),
         }
     }
 
@@ -110,7 +123,17 @@ impl SkillRegistry {
         // Ensure directory exists
         std::fs::create_dir_all(&skills_dir).ok();
 
-        Self::new(skills_dir)
+        Self {
+            skills: RwLock::new(HashMap::new()),
+            skills_dir,
+            client: reqwest::Client::new(),
+            sandbox: SkillSandbox::default_sandbox(),
+        }
+    }
+
+    /// Get a reference to the sandbox for external validation
+    pub fn sandbox(&self) -> &SkillSandbox {
+        &self.sandbox
     }
 
     /// Load all skills from disk
@@ -344,7 +367,7 @@ impl SkillRegistry {
         }
     }
 
-    /// Execute shell skill
+    /// Execute shell skill (sandboxed)
     async fn execute_shell(
         &self,
         config: &ExecutionConfig,
@@ -356,22 +379,22 @@ impl SkillRegistry {
         // Interpolate parameters
         let interpolated = interpolate_template(command, params);
 
-        let output = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(&interpolated)
-            .output()
-            .await
-            .context("Failed to execute command")?;
+        // Execute through sandbox
+        let result = self.sandbox.execute(&interpolated).await?;
 
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        if result.success {
+            Ok(result.stdout)
+        } else if result.timed_out {
+            anyhow::bail!("Command timed out: {}", result.stderr)
+        } else if !result.warnings.is_empty() && result.stderr.is_empty() {
+            // Command was blocked by sandbox
+            anyhow::bail!("Command blocked by sandbox: {}", result.warnings.join("; "))
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Command failed: {}", stderr)
+            anyhow::bail!("Command failed: {}", result.stderr)
         }
     }
 
-    /// Execute script skill
+    /// Execute script skill (sandboxed)
     async fn execute_script(
         &self,
         config: &ExecutionConfig,
@@ -384,25 +407,18 @@ impl SkillRegistry {
         // Interpolate parameters in script
         let interpolated = interpolate_template(script, params);
 
-        let (cmd, args): (&str, Vec<&str>) = match language {
-            "python" | "python3" => ("python3", vec!["-c", &interpolated]),
-            "javascript" | "node" => ("node", vec!["-e", &interpolated]),
-            "ruby" => ("ruby", vec!["-e", &interpolated]),
-            "bash" | "sh" => ("bash", vec!["-c", &interpolated]),
-            _ => anyhow::bail!("Unsupported script language: {}", language),
-        };
+        // Execute through sandbox
+        let result = self.sandbox.execute_script(&interpolated, language).await?;
 
-        let output = tokio::process::Command::new(cmd)
-            .args(&args)
-            .output()
-            .await
-            .context("Failed to execute script")?;
-
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        if result.success {
+            Ok(result.stdout)
+        } else if result.timed_out {
+            anyhow::bail!("Script timed out: {}", result.stderr)
+        } else if !result.warnings.is_empty() && result.stderr.is_empty() {
+            // Script was blocked by sandbox
+            anyhow::bail!("Script blocked by sandbox: {}", result.warnings.join("; "))
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Script failed: {}", stderr)
+            anyhow::bail!("Script failed: {}", result.stderr)
         }
     }
 
