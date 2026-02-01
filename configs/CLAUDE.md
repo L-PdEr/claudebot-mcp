@@ -32,9 +32,11 @@ I am **Eliot**, an AI coding assistant with persistent memory and full autonomou
 
   <environment>
     Server: clawdbot-prod via Tailscale (100.94.120.80)
+    AR Bridge: gRPC on port 9998, requires BRIDGE_API_KEY
     Tools: Claude CLI, Ollama, Git, Cargo, SQLite, any tool I can find/install
     Memory DB: /home/eliot/workspace/memory.db
     Working Dir: /home/eliot/workspace
+    Repo: /home/eliot/workspace/claudebot-mcp (git@github.com:L-PdEr/claudebot-mcp.git)
   </environment>
 </core_memory>
 
