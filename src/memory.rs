@@ -560,8 +560,25 @@ impl MemoryStore {
         // 3. Fuse results
         let fused = self.fuse_results(keyword_results, vector_results, keyword_weight);
 
-        // 4. Return top-k
-        Ok(fused.into_iter().take(limit).collect())
+        // 4. Return top-k, with recency fallback if empty
+        let results: Vec<ScoredMemory> = fused.into_iter().take(limit).collect();
+
+        if results.is_empty() {
+            // Fallback: return recent memories with low score
+            debug!("Hybrid search empty, falling back to recent memories");
+            let recent = self.get_recent(limit.min(3))?;
+            return Ok(recent
+                .into_iter()
+                .map(|entry| ScoredMemory {
+                    entry,
+                    score: 0.05,
+                    keyword_score: 0.0,
+                    vector_score: 0.0,
+                })
+                .collect());
+        }
+
+        Ok(results)
     }
 
     /// Search by embedding similarity only
@@ -602,14 +619,22 @@ impl MemoryStore {
     ///
     /// RRF is more robust than weighted average because it uses rank positions
     /// instead of raw scores, avoiding normalization issues.
-    /// Formula: RRF(d) = Σ 1/(k + rank_i(d)) where k=60 (standard constant)
+    /// Formula: RRF(d) = Σ 1/(k + rank_i(d)) where k adapts to result set size
     fn fuse_results(
         &self,
         keyword_results: Vec<SearchResult>,
         vector_results: Vec<(String, f64)>,
         _keyword_weight: f32, // Kept for API compat, RRF doesn't use weights
     ) -> Vec<ScoredMemory> {
-        const RRF_K: f64 = 60.0; // Standard RRF constant
+        // Adaptive RRF k: smaller for small result sets (more top-rank emphasis)
+        let total_results = keyword_results.len() + vector_results.len();
+        let rrf_k: f64 = if total_results <= 5 {
+            10.0  // Strong top-rank emphasis for small sets
+        } else if total_results <= 20 {
+            30.0  // Moderate emphasis
+        } else {
+            60.0  // Standard for large sets
+        };
         const TIME_DECAY_DAYS: f64 = 30.0; // Half-life in days
 
         let now = std::time::SystemTime::now()
@@ -664,10 +689,10 @@ impl MemoryStore {
                 // Calculate RRF score
                 let mut rrf_score = 0.0;
                 if let Some(rank) = kw_rank {
-                    rrf_score += 1.0 / (RRF_K + rank as f64);
+                    rrf_score += 1.0 / (rrf_k + rank as f64);
                 }
                 if let Some(rank) = vec_rank {
-                    rrf_score += 1.0 / (RRF_K + rank as f64);
+                    rrf_score += 1.0 / (rrf_k + rank as f64);
                 }
 
                 // Apply time decay: score * 2^(-age_days / half_life)

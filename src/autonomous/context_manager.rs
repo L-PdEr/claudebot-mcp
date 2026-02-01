@@ -342,11 +342,31 @@ impl ContextManager {
     /// Build expanded search query from prompt + recent conversation
     /// Short prompts like "yes", "ok", "do it" need context from previous messages
     fn build_search_query(&self, prompt: &str, conversation: &[(String, String)]) -> String {
-        // If prompt is short (likely a confirmation), use recent conversation for context
+        let prompt_lower = prompt.to_lowercase().trim().to_string();
         let words: Vec<&str> = prompt.split_whitespace().collect();
 
+        // Detect confirmation/continuation patterns
+        let is_confirmation = matches!(
+            prompt_lower.as_str(),
+            "yes" | "ok" | "sure" | "do it" | "go ahead" | "proceed" |
+            "yep" | "yeah" | "correct" | "right" | "continue" | "y" |
+            "okay" | "yes please" | "go" | "run it" | "execute"
+        );
+
+        if is_confirmation && !conversation.is_empty() {
+            // For confirmations, use the last assistant message (what they're confirming)
+            if let Some((_, last_assistant)) = conversation.iter()
+                .rev()
+                .find(|(role, _)| role == "assistant")
+            {
+                // Extract first 300 chars of assistant's last message
+                let context: String = last_assistant.chars().take(300).collect();
+                return context;
+            }
+        }
+
+        // For short non-confirmation queries, combine with recent context
         if words.len() <= 3 && !conversation.is_empty() {
-            // Combine last 2-3 messages for better search context
             let recent: Vec<&str> = conversation
                 .iter()
                 .rev()
@@ -355,11 +375,10 @@ impl ContextManager {
                 .collect();
 
             let combined = format!("{} {}", recent.join(" "), prompt);
-            // Limit to avoid too long queries
-            combined.chars().take(500).collect()
-        } else {
-            prompt.to_string()
+            return combined.chars().take(500).collect();
         }
+
+        prompt.to_string()
     }
 
     /// Get recent conversation history
