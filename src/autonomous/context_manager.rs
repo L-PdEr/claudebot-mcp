@@ -83,7 +83,21 @@ impl EnrichedContext {
     pub fn format_for_prompt(&self) -> String {
         let mut parts = Vec::new();
 
-        // Identity context (most important)
+        // Recent conversation history (CRITICAL for context continuity)
+        if !self.conversation.is_empty() {
+            let conv_text = self
+                .conversation
+                .iter()
+                .map(|(role, content)| {
+                    let prefix = if role == "user" { "User" } else { "Assistant" };
+                    format!("{}: {}", prefix, content)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            parts.push(format!("[Recent Conversation]\n{}", conv_text));
+        }
+
+        // Identity context
         if let Some(ref identity) = self.identity {
             parts.push(format!("[User Identity]\n{}", identity));
         }
