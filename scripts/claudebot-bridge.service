@@ -1,0 +1,17 @@
+[Unit]
+Description=ClaudeBot gRPC Bridge for AR
+After=network.target
+
+[Service]
+Type=simple
+User=eliot
+Group=eliot
+WorkingDirectory=/home/eliot/workspace
+Environment="BRIDGE_GRPC_PORT=9998"
+EnvironmentFile=/home/eliot/.config/claudebot/env
+ExecStart=/home/eliot/bin/claudebot-mcp --grpc-server
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
