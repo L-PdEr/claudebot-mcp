@@ -203,12 +203,15 @@ impl ContextManager {
             context.identity = self.get_identity_context(user_id, memory);
         }
 
-        // 2. Retrieve relevant memories using hybrid search
-        context.memories = self.retrieve_memories(prompt, memory, llama).await;
-        context.hyde_used = self.config.use_hyde && llama.is_available().await;
-
-        // 3. Get recent conversation history
+        // 2. Get recent conversation history FIRST (needed for memory search)
         context.conversation = self.get_conversation_history(chat_id, conversation);
+
+        // 3. Build expanded search query from prompt + recent conversation
+        let search_query = self.build_search_query(prompt, &context.conversation);
+
+        // 4. Retrieve relevant memories using expanded query
+        context.memories = self.retrieve_memories(&search_query, memory, llama).await;
+        context.hyde_used = self.config.use_hyde && llama.is_available().await;
 
         // 4. Find related entities from graph
         context.entities = self.find_related_entities(prompt, &context.memories, graph);
@@ -333,6 +336,29 @@ impl ContextManager {
                 warn!("Memory hybrid search failed: {}", e);
                 vec![]
             }
+        }
+    }
+
+    /// Build expanded search query from prompt + recent conversation
+    /// Short prompts like "yes", "ok", "do it" need context from previous messages
+    fn build_search_query(&self, prompt: &str, conversation: &[(String, String)]) -> String {
+        // If prompt is short (likely a confirmation), use recent conversation for context
+        let words: Vec<&str> = prompt.split_whitespace().collect();
+
+        if words.len() <= 3 && !conversation.is_empty() {
+            // Combine last 2-3 messages for better search context
+            let recent: Vec<&str> = conversation
+                .iter()
+                .rev()
+                .take(3)
+                .map(|(_, content)| content.as_str())
+                .collect();
+
+            let combined = format!("{} {}", recent.join(" "), prompt);
+            // Limit to avoid too long queries
+            combined.chars().take(500).collect()
+        } else {
+            prompt.to_string()
         }
     }
 
